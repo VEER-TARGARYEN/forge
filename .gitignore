@@ -1,0 +1,19 @@
+# binaries
+forge
+forge.exe
+*.test.exe
+ptcheck.exe
+
+# build/test scratch
+.gotmp/
+bench-*.json
+
+# forge runtime state (never commit - may contain keys or large models)
+.forge/
+config.json
+
+# editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
