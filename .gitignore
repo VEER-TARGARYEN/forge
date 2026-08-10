@@ -1,16 +1,15 @@
-# binaries
-forge
-forge.exe
+# compiled binaries (root only - do NOT match the cmd/forge source dir)
+/forge
+/forge.exe
 *.test.exe
-ptcheck.exe
+/ptcheck.exe
 
 # build/test scratch
 .gotmp/
 bench-*.json
 
 # forge runtime state (never commit - may contain keys or large models)
-.forge/
-config.json
+/.forge/
 
 # editor / OS
 .vscode/
