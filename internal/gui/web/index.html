@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>FORGE</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23cbffc3'/><path d='M10 22V10h11M10 16h8' stroke='%230a3910' stroke-width='2.6' fill='none' stroke-linecap='round'/></svg>">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-mark" data-icon="forge"></div>
+      <div class="col">
+        <span class="brand-name">FORGE</span>
+        <span class="t-meta" style="font-size:9px">Workspace</span>
+      </div>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="sidebar-foot">
+      <div class="row" style="gap:8px">
+        <span class="dot" id="foot-dot"></span>
+        <span class="t-mono dimmer truncate grow" id="foot-model">no model</span>
+      </div>
+    </div>
+  </aside>
+
+  <div id="main">
+    <header id="topbar">
+      <div class="crumbs" id="crumbs"></div>
+      <div class="grow"></div>
+      <button class="btn btn-ghost btn-sm" id="palette-btn">
+        <span data-icon="search"></span> Search <span class="kbd">&#8984;K</span>
+      </button>
+    </header>
+    <div id="signal" class="idle"></div>
+    <main id="view"></main>
+  </div>
+</div>
+
+<div id="overlay-root"></div>
+<div class="toast-wrap" id="toasts"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -30,7 +31,10 @@ type lazyIndex struct {
 	// local, when set, embeds in-process instead of calling a provider.
 	local *embed.Embedder
 	opts  index.Options
-	out   *os.File
+	// out is an io.Writer rather than *os.File so a non-terminal caller — the
+	// browser interface — can discard progress chatter instead of leaking it
+	// onto the server's stderr.
+	out io.Writer
 }
 
 func newLazyIndex(root, dir string, rt *router.Router, embedClass string, opts index.Options) *lazyIndex {

@@ -80,6 +80,15 @@ type Observer interface {
 	SetActivity(format string, args ...any)
 	AddUsage(provider, model string, prompt, completion int)
 	SetCounts(subAgents, changed int)
+
+	// The structured half of the interface. A terminal renders the loop by
+	// reading the text the agent prints; anything else — a GUI, a log shipper,
+	// a test harness — needs the same information as data rather than as
+	// formatted lines it would have to parse back apart.
+	OnText(delta string)
+	OnToolCall(id, name, args string)
+	OnToolResult(id string, ok bool, summary string)
+	OnFileChanged(path string)
 }
 
 // notify is a nil-safe Observer accessor, so call sites stay uncluttered.
@@ -96,6 +105,10 @@ func (nopObserver) SetStep(int)                       {}
 func (nopObserver) SetActivity(string, ...any)        {}
 func (nopObserver) AddUsage(string, string, int, int) {}
 func (nopObserver) SetCounts(int, int)                {}
+func (nopObserver) OnText(string)                     {}
+func (nopObserver) OnToolCall(string, string, string) {}
+func (nopObserver) OnToolResult(string, bool, string) {}
+func (nopObserver) OnFileChanged(string)              {}
 
 // VerifyFunc runs the project's checks and reports the summary, whether it
 // passed, and how many located problems there were.
@@ -179,7 +192,10 @@ func New(rt *router.Router, reg *tools.Registry, env *tools.Env, cfg Config, out
 	}
 	// Tools report their own mutations rather than the agent inferring them
 	// from arguments, so a partial or redirected write is still recorded.
-	env.Changed = func(path string) { a.changed[path] = true }
+	env.Changed = func(path string) {
+		a.changed[path] = true
+		a.notify().OnFileChanged(path)
+	}
 
 	// One system message holding everything invariant. Keeping the prefix
 	// byte-identical across turns is what lets llama.cpp reuse its KV cache;
@@ -278,27 +294,42 @@ var contentBearingTools = map[string]bool{
 	"write_file": true,
 }
 
-// blockLoopLimit is how many times the same block may fail the same way
+// blockLoopLimit is how many times the same unproductive block may repeat
 // before the run is called off. Three is enough to distinguish a model
 // correcting itself from one that cannot.
 const blockLoopLimit = 3
 
-// trackBlockFailures counts identical (path, error) block failures and returns
-// a stop reason once one repeats past the limit. A successful block clears the
-// count for its path: progress means the model is still steerable.
-func (a *Agent) trackBlockFailures(results []tools.BlockResult) string {
+// trackBlockProgress counts blocks that changed nothing — whether they failed
+// or were already satisfied — and returns a stop reason once the same one
+// repeats past the limit.
+//
+// No-ops have to count. A model that re-sends an edit it already made gets a
+// successful result every time, so a guard watching only failures never fires
+// and the run spends its whole budget rewriting a file with itself.
+func (a *Agent) trackBlockProgress(results []tools.BlockResult) string {
 	for _, r := range results {
 		key := r.Block.Path + "\x00" + r.Message
-		if r.OK {
-			delete(a.blockSeen, key)
+		if r.OK && !r.NoOp {
+			// Real progress. Forget this path's history: the model is still
+			// steerable, and an early stumble should not count against a
+			// later, different mistake.
+			for k := range a.blockSeen {
+				if strings.HasPrefix(k, r.Block.Path+"\x00") {
+					delete(a.blockSeen, k)
+				}
+			}
 			continue
 		}
 		a.blockSeen[key]++
 		if a.blockSeen[key] >= blockLoopLimit {
+			what := "failing"
+			if r.NoOp {
+				what = "no-op"
+			}
 			return fmt.Sprintf(
-				"model repeated the same failing edit to %s %d times (%s); "+
-					"it is not acting on the error, so stopping rather than burning the step budget",
-				r.Block.Path, a.blockSeen[key], r.Message)
+				"model repeated the same %s edit to %s %d times (%s); "+
+					"it is not making progress, so stopping rather than burning the step budget",
+				what, r.Block.Path, a.blockSeen[key], r.Message)
 		}
 	}
 	return ""
@@ -420,7 +451,7 @@ func (a *Agent) Run(ctx context.Context, task string) (*Outcome, error) {
 			// that cannot act on a rejection re-sends the identical block until
 			// the step budget runs out — ten turns and six minutes of CPU to
 			// learn nothing. Stop as soon as the loop is unmistakable.
-			if stuck := a.trackBlockFailures(results); stuck != "" {
+			if stuck := a.trackBlockProgress(results); stuck != "" {
 				a.printf("  ! %s\n", stuck)
 				outcome.StopReason = stuck
 				break
@@ -564,6 +595,9 @@ func (a *Agent) callModel(ctx context.Context) (*provider.Response, error) {
 		Temperature: a.cfg.Temperature,
 	}, func(c provider.Chunk) error {
 		printer.write(c.Content)
+		if c.Content != "" {
+			a.notify().OnText(c.Content)
+		}
 		return nil
 	})
 	printer.flush()
@@ -612,6 +646,8 @@ func (a *Agent) runToolCalls(ctx context.Context, calls []provider.ToolCall) (st
 	for i, tc := range calls {
 		name := tc.Function.Name
 		args := json.RawMessage(tc.Function.Arguments)
+
+		a.notify().OnToolCall(tc.ID, name, string(args))
 
 		t, ok := a.reg.Get(name)
 		if !ok {
@@ -664,6 +700,7 @@ func (a *Agent) runToolCalls(ctx context.Context, calls []provider.ToolCall) (st
 		}
 		results[i] = normalizeResult(name, res, err)
 		a.printf("  %s %s\n", mark(results[i]), firstLines(results[i].ForHuman(), 6))
+		a.notify().OnToolResult(tc.ID, !results[i].IsError, firstLines(results[i].ForHuman(), 6))
 	}
 
 	wg.Wait()
@@ -683,6 +720,7 @@ func (a *Agent) runToolCalls(ctx context.Context, calls []provider.ToolCall) (st
 		}
 		if tools.IsParallelSafe(mustTool(a.reg, tc.Function.Name)) && len(calls) > 1 {
 			a.printf("  %s %s\n", mark(results[i]), firstLines(results[i].ForHuman(), 6))
+			a.notify().OnToolResult(tc.ID, !results[i].IsError, firstLines(results[i].ForHuman(), 6))
 		}
 		a.appendToolResult(tc, results[i])
 	}

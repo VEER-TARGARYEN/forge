@@ -71,6 +71,8 @@ func main() {
 		err = cmdEmbed(args)
 	case "serve":
 		err = cmdServe(args)
+	case "gui":
+		err = cmdGUI(args)
 	case "usage":
 		err = cmdUsage(args)
 	case "selfcheck":
@@ -106,6 +108,7 @@ usage: forge <command> [flags]
   search    query the code search index
   verify    run the project's build, lint, and test checks
   embed     run the built-in embedding model, or benchmark its kernels
+  gui       open the browser interface for running and watching sessions
   serve     expose the router as an OpenAI-compatible endpoint
   usage     summarize the token ledger
   selfcheck run the routing and streaming invariants against stub servers

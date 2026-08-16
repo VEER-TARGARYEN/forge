@@ -255,6 +255,12 @@ type BlockResult struct {
 	Message string
 	Added   int
 	Removed int
+	// NoOp marks a block that was valid but changed nothing — a SEARCH and
+	// REPLACE that are already identical. It is separate from OK because the
+	// block is not *wrong*; it simply is not progress, and a caller counting
+	// turns needs to tell those apart or a model that re-sends the same
+	// satisfied edit forever looks productive every time.
+	NoOp bool
 }
 
 // ApplyBlocks applies each block in order and reports per-block outcomes.
@@ -346,8 +352,8 @@ func applyOne(b Block, env *Env) BlockResult {
 	}
 
 	if updated == old && exists {
-		res.OK = true
-		res.Message = "no change (file already matches)"
+		res.OK, res.NoOp = true, true
+		res.Message = "no change — " + b.Path + " already contains exactly that text"
 		return res
 	}
 

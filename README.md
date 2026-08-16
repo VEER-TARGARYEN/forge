@@ -105,12 +105,53 @@ Shows every provider's reachability and every class chain's resolved state.
 | `forge search "..."` | Query the index directly |
 | `forge verify` | Run the project's build, lint, and test checks |
 | `forge embed -bench` | Measure the built-in encoder's throughput |
+| `forge gui` | Browser interface on `127.0.0.1:4100` |
 | `forge serve` | OpenAI-compatible endpoint on `127.0.0.1:4000` |
 | `forge usage -since 24h -by provider` | Summarize the token ledger |
 | `forge selfcheck` | Run routing/streaming invariants against stub servers |
 
 **Model ids drift.** If `doctor` reports a model-not-found, run
 `forge models cerebras` and correct the id in the config. Never guess.
+
+---
+
+## The browser interface
+
+```bash
+forge gui -dir .
+```
+
+Opens `127.0.0.1:4100`. Same agent, same config, same workspace sandbox as
+`forge do` — the difference is that a run becomes something you can watch,
+interrupt, and approve a diff at a time.
+
+- **Sessions** stream live over server-sent events: prose as it is generated,
+  each tool call as one dense line that fills in its result, files as they are
+  written, tokens and elapsed time as they accrue.
+- **Approval** is a full-bleed diff. Added and removed lines carry a colour
+  tint instead of `+`/`-` columns, and `Y`/`N` work without reaching for the
+  mouse. The agent is genuinely blocked while you decide.
+- **Reconnects replay.** Every session keeps an event log and the stream
+  resumes from the last sequence number you saw, so a reload or a closed
+  laptop lid does not lose the middle of a run.
+- **Search, repository map, providers, usage, verification** are the same
+  engines the CLI uses, rendered.
+
+The whole front end is compiled into the binary and makes **no network
+requests** — no CDN, no web fonts, no analytics. It renders on a machine with
+the network cable pulled, which is the point of a local-first agent.
+
+Type is the Apple system stack (`SF Pro Text` / `SF Pro Display` / `SF Mono`,
+falling back through Helvetica Neue and Segoe UI), so it looks native on macOS
+and iOS and stays metrically close everywhere else.
+
+Flags worth knowing: `-addr` to move the port, `-open=false` to skip launching
+a browser, `-dir` to set the workspace the agent may act in. Everything else
+matches `forge do`.
+
+Because it is one static bundle over HTTP on localhost, it installs as a PWA
+from the browser on desktop, Android, and iOS, and wraps in Tauri for a ~5 MB
+desktop app without a second implementation.
 
 ---
 

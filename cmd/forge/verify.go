@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -20,7 +21,7 @@ type verifier struct {
 	root    string
 	checks  []verify.Check
 	opts    verify.Options
-	out     *os.File
+	out     io.Writer
 	lastRep *verify.Report
 }
 

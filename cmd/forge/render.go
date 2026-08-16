@@ -182,6 +182,14 @@ func (d *display) SetCounts(subAgents, changed int) {
 	}
 }
 
+// The structured observer events are for non-terminal renderers. A terminal
+// already shows all of this as the agent prints it, so re-rendering it here
+// would duplicate every line.
+func (d *display) OnText(string)                     {}
+func (d *display) OnToolCall(string, string, string) {}
+func (d *display) OnToolResult(string, bool, string) {}
+func (d *display) OnFileChanged(string)              {}
+
 // Close tears the UI down. Safe to call more than once, and deferred early so
 // a panic or a signal still restores the terminal — leaving a shell in raw
 // mode is the one failure a TUI must never have.
