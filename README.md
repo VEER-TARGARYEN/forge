@@ -105,6 +105,7 @@ Shows every provider's reachability and every class chain's resolved state.
 | `forge search "..."` | Query the index directly |
 | `forge verify` | Run the project's build, lint, and test checks |
 | `forge embed -bench` | Measure the built-in encoder's throughput |
+| `forge app` | Open FORGE as a desktop app in its own window |
 | `forge gui` | Browser interface on `127.0.0.1:4100` |
 | `forge serve` | OpenAI-compatible endpoint on `127.0.0.1:4000` |
 | `forge usage -since 24h -by provider` | Summarize the token ledger |
@@ -112,6 +113,50 @@ Shows every provider's reachability and every class chain's resolved state.
 
 **Model ids drift.** If `doctor` reports a model-not-found, run
 `forge models cerebras` and correct the id in the config. Never guess.
+
+---
+
+## Install as a desktop app
+
+```bash
+go run ./cmd/mkdist
+```
+
+Produces `dist/Forge.exe` — one file with the application inside it. Run it and
+it installs for the current user: binaries under `%LOCALAPPDATA%\Programs\FORGE`,
+Start Menu and Desktop shortcuts, and `forge` on your PATH. **No administrator
+rights and no UAC prompt**, because nothing is written outside your own profile.
+`go run ./cmd/mkdist -all` cross-builds installers for Windows, macOS, and Linux.
+
+Uninstalling removes exactly what installation created and leaves `~/.forge`
+— your config, history, and index — alone:
+
+```bash
+"%LOCALAPPDATA%\Programs\FORGE\forge-setup.exe" -uninstall
+```
+
+Two binaries are installed. `forge.exe` is the CLI. `forge-app.exe` is the same
+program linked for the GUI subsystem, so double-clicking it opens the app with
+no console window flashing up behind it. The icon is generated from geometry at
+install time rather than shipped as a file, so it is sharp at every size the
+shell asks for.
+
+**On any desktop, without the installer:**
+
+```bash
+forge app
+```
+
+Opens FORGE in its own window using a Chromium-family browser's app mode —
+no tab strip, no address bar, its own taskbar entry and profile. Closing the
+window stops the server, so a run never keeps going unwatched. There is no
+Electron runtime to bundle and no Rust toolchain to build against; a desktop
+shell that needed a C compiler would undo the single-static-binary property the
+whole project is organised around.
+
+Failing that, the interface installs straight from the browser as a PWA —
+Chrome and Edge on desktop, Android, and iOS all give it a real application
+icon and window. Settings has an **Install** button when the browser offers one.
 
 ---
 

@@ -66,18 +66,31 @@ func newGUIBackend(e *env, dir string, em *embed.Embedder, o guiOptions) *guiBac
 	}
 }
 
+// workspace reads the current default directory. It is behind the mutex
+// because the browser can change it while a session is running.
+func (g *guiBackend) workspace() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.defDir
+}
+
 // resolveDir turns a browser-supplied directory into an absolute path,
-// defaulting to the one the server was started in.
+// defaulting to the current workspace.
 func (g *guiBackend) resolveDir(dir string) string {
+	def := g.workspace()
 	if strings.TrimSpace(dir) == "" {
-		dir = g.defDir
+		dir = def
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return g.defDir
+		return def
 	}
 	return abs
 }
+
+// ResolveDir exposes path resolution so a session can record where it really
+// ran rather than the possibly-empty string it was asked with.
+func (g *guiBackend) ResolveDir(dir string) string { return g.resolveDir(dir) }
 
 func (g *guiBackend) indexFor(dir string) *lazyIndex {
 	g.mu.Lock()
@@ -381,6 +394,68 @@ func (g *guiBackend) Providers(ctx context.Context, probe bool) []gui.ProviderVi
 	return out
 }
 
+// SetWorkspace repoints the agent and remembers the choice, so the next
+// launch from a desktop shortcut lands where the user left off.
+func (g *guiBackend) SetWorkspace(dir string) (gui.BootstrapView, error) {
+	abs, err := filepath.Abs(strings.TrimSpace(dir))
+	if err != nil {
+		return gui.BootstrapView{}, err
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return gui.BootstrapView{}, fmt.Errorf("%s does not exist", abs)
+	}
+	if !st.IsDir() {
+		return gui.BootstrapView{}, fmt.Errorf("%s is not a directory", abs)
+	}
+	// Resolve through the workspace type so the same rules that bound the
+	// agent decide whether a directory is usable at all.
+	if _, err := tools.NewWorkspace(abs); err != nil {
+		return gui.BootstrapView{}, err
+	}
+
+	g.mu.Lock()
+	g.defDir = abs
+	g.mu.Unlock()
+
+	if err := saveWorkspace(g.e.cfg.Dir(), abs); err != nil {
+		// Losing the preference is not worth refusing the change the user
+		// just made; it only costs them re-picking next launch.
+		fmt.Fprintf(os.Stderr, "could not remember workspace: %v\n", err)
+	}
+	return g.Bootstrap(), nil
+}
+
+// guiState is the small amount of UI preference that outlives a process.
+type guiState struct {
+	Workspace string `json:"workspace"`
+}
+
+func guiStatePath(stateDir string) string { return filepath.Join(stateDir, "gui.json") }
+
+func loadWorkspace(stateDir string) string {
+	b, err := os.ReadFile(guiStatePath(stateDir))
+	if err != nil {
+		return ""
+	}
+	var s guiState
+	if json.Unmarshal(b, &s) != nil {
+		return ""
+	}
+	if st, err := os.Stat(s.Workspace); err != nil || !st.IsDir() {
+		return "" // the directory moved or was deleted since
+	}
+	return s.Workspace
+}
+
+func saveWorkspace(stateDir, dir string) error {
+	b, err := json.MarshalIndent(guiState{Workspace: dir}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(guiStatePath(stateDir), b, 0o644)
+}
+
 func (g *guiBackend) ResetHealth() {
 	g.e.health.Clear()
 	_ = g.e.health.Flush()
@@ -406,7 +481,8 @@ func (g *guiBackend) Bootstrap() gui.BootstrapView {
 	}
 
 	var checks []string
-	if v := g.verifierFor(g.defDir); v.enabled() {
+	ws := g.workspace()
+	if v := g.verifierFor(ws); v.enabled() {
 		for _, c := range v.checks {
 			checks = append(checks, c.Command)
 		}
@@ -421,7 +497,7 @@ func (g *guiBackend) Bootstrap() gui.BootstrapView {
 		Version:    version,
 		ConfigPath: g.e.cfg.Path(),
 		StateDir:   g.e.cfg.Dir(),
-		Workspace:  g.defDir,
+		Workspace:  ws,
 		Classes:    classes,
 		ClassNames: g.e.cfg.ClassNames(),
 		Default:    g.e.cfg.Server.DefaultClass,

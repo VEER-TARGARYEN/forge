@@ -153,6 +153,7 @@ type Agent struct {
 	changed     map[string]bool
 	toolSeen    map[string]int
 	blockSeen   map[string]int
+	codeNudges  int
 	compactions int
 	tokensSaved int
 }
@@ -292,6 +293,50 @@ func (a *Agent) Messages() []provider.Message { return a.msgs }
 var contentBearingTools = map[string]bool{
 	"edit_file":  true,
 	"write_file": true,
+}
+
+// maxCodeNudges bounds how often a turn showing unapplied code is handed back.
+// A model that has not taken the hint twice will not take it a third time, and
+// the run should end with an honest "nothing changed" rather than loop.
+const maxCodeNudges = 2
+
+// placeholderPath is the slot token in the block instructions. Small models
+// copy it verbatim instead of substituting a real path — naming it here means
+// the loop can say exactly what went wrong rather than "no blocks found".
+const placeholderPath = "FILE_PATH_GOES_HERE"
+
+// unappliedCode reports why a turn's content looks like an edit the model
+// forgot to actually make, or "" when the turn is a legitimate final answer.
+//
+// The test is deliberately narrow. Prose about code, a shell transcript, or a
+// short illustrative snippet must not trigger it — only a fenced block that
+// carries enough source to be the thing the model was asked to write.
+func unappliedCode(content string) string {
+	if strings.Contains(content, placeholderPath) {
+		return "You left " + placeholderPath + " in your answer instead of a real file path."
+	}
+	fences := strings.Count(content, "```")
+	if fences < 2 {
+		return ""
+	}
+	// Find the largest fenced block and judge on that.
+	best := 0
+	parts := strings.Split(content, "```")
+	for i := 1; i < len(parts); i += 2 {
+		body := parts[i]
+		if nl := strings.IndexByte(body, '\n'); nl >= 0 {
+			body = body[nl+1:] // drop the language tag
+		}
+		if n := strings.Count(strings.TrimSpace(body), "\n"); n > best {
+			best = n
+		}
+	}
+	// Three or more lines of fenced content, with no edit block and no tool
+	// call anywhere in the turn, is a file the model meant to write.
+	if best >= 3 {
+		return "You showed code in a code block but did not apply it: there was no edit block and no tool call."
+	}
+	return ""
 }
 
 // blockLoopLimit is how many times the same unproductive block may repeat
@@ -524,6 +569,23 @@ func (a *Agent) Run(ctx context.Context, task string) (*Outcome, error) {
 			}
 		}
 
+		// A turn that shows source in a fence but takes no action is a model
+		// that described an edit instead of making one. Treating that as "I am
+		// finished" is how a run ends reporting success with nothing written —
+		// the same silent no-op as a tool call emitted as text, in a different
+		// costume. Push back with the specific problem instead.
+		if a.codeNudges < maxCodeNudges {
+			if why := unappliedCode(resp.Content); why != "" {
+				a.codeNudges++
+				a.printf("  ! %s\n", why)
+				a.msgs = append(a.msgs, provider.Message{
+					Role:    provider.RoleUser,
+					Content: why + " Nothing has been written yet. Make the change now.",
+				})
+				continue
+			}
+		}
+
 		// The model believes it is finished. Before accepting that, run the
 		// project's own checks — a model's confidence is not evidence.
 		if done, reason := a.settle(ctx, outcome, resp); done {
@@ -535,6 +597,14 @@ func (a *Agent) Run(ctx context.Context, task string) (*Outcome, error) {
 	if outcome.StopReason == "" {
 		outcome.StopReason = fmt.Sprintf("hit step limit (%d)", a.cfg.MaxSteps)
 	}
+
+	// Every path out of the loop that is not the model's own judgement — the
+	// step limit, a repeat guard, an exhausted budget — skips settle, and so
+	// skips verification. Files were still written. Reporting "changed 1 file"
+	// with no word on whether it builds is the one thing this loop exists to
+	// avoid, so check on the way out.
+	a.finalVerify(ctx, outcome)
+
 	return a.finish(outcome, start, outcome.StopReason), nil
 }
 
@@ -544,6 +614,37 @@ func (a *Agent) Run(ctx context.Context, task string) (*Outcome, error) {
 // verification back to the model for another attempt. Verification is skipped
 // when nothing was changed: there is nothing to have broken, and a full test
 // run to confirm that is pure latency.
+// finalVerify runs the project's checks once for a run that ended without
+// reaching settle, so the outcome still says whether the work builds.
+//
+// It reports; it does not repair. The run is already over, and reopening it
+// here would turn a bounded loop into an unbounded one at the exit.
+func (a *Agent) finalVerify(ctx context.Context, outcome *Outcome) {
+	if outcome.VerifyRan || a.cfg.Verify == nil || len(a.changed) == 0 {
+		return
+	}
+	// A cancelled run is one the user stopped. Making them wait on a test
+	// suite afterwards is the opposite of what they asked for.
+	if ctx.Err() != nil {
+		return
+	}
+	a.printf("  ⋯ verifying %d changed file(s)\n", len(a.changed))
+	a.notify().SetActivity("running the project's checks")
+	summary, passed, _, err := a.cfg.Verify(ctx)
+	if err != nil {
+		a.printf("  ! verification could not run: %v\n", err)
+		return
+	}
+	outcome.VerifyRan = true
+	outcome.VerifySummary = summary
+	outcome.Verified = passed
+	if passed {
+		a.printf("  ✓ verification passed\n")
+	} else {
+		a.printf("  ✗ verification failed\n")
+	}
+}
+
 func (a *Agent) settle(ctx context.Context, outcome *Outcome, resp *provider.Response) (bool, string) {
 	outcome.FinalText = strings.TrimSpace(resp.Content)
 

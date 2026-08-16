@@ -38,15 +38,28 @@ import (
 
 const version = "1.0.0 (phases 0-8)"
 
+// defaultCommand is what to run when the binary is invoked with no arguments.
+//
+// Empty for the CLI build, where printing usage is the right answer. The
+// desktop build sets it to "app" via
+// -ldflags "-X main.defaultCommand=app -H=windowsgui", which is what lets one
+// source tree produce both a terminal tool and a double-clickable application
+// without a second main package or a duplicated dispatch table.
+var defaultCommand = ""
+
 func main() {
 	log.SetFlags(0)
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+	argv := os.Args
+	if len(argv) < 2 {
+		if defaultCommand == "" {
+			usage()
+			os.Exit(2)
+		}
+		argv = append(argv, defaultCommand)
 	}
-	args := os.Args[2:]
+	args := argv[2:]
 	var err error
-	switch os.Args[1] {
+	switch argv[1] {
 	case "init":
 		err = cmdInit(args)
 	case "doctor":
@@ -73,6 +86,8 @@ func main() {
 		err = cmdServe(args)
 	case "gui":
 		err = cmdGUI(args)
+	case "app":
+		err = cmdApp(args)
 	case "usage":
 		err = cmdUsage(args)
 	case "selfcheck":
@@ -82,7 +97,7 @@ func main() {
 	case "help", "-h", "--help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", argv[1])
 		usage()
 		os.Exit(2)
 	}
@@ -108,6 +123,7 @@ usage: forge <command> [flags]
   search    query the code search index
   verify    run the project's build, lint, and test checks
   embed     run the built-in embedding model, or benchmark its kernels
+  app       open FORGE as a desktop app in its own window
   gui       open the browser interface for running and watching sessions
   serve     expose the router as an OpenAI-compatible endpoint
   usage     summarize the token ledger

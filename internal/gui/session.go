@@ -43,6 +43,14 @@ type Backend interface {
 	ResetHealth()
 	Usage() UsageView
 	Bootstrap() BootstrapView
+
+	// SetWorkspace changes the directory the agent may act in and remembers
+	// it. A desktop launcher cannot pass -dir, so without this the app is
+	// stuck wherever the shortcut's working directory happened to point.
+	SetWorkspace(dir string) (BootstrapView, error)
+
+	// ResolveDir reports the absolute directory a request would act in.
+	ResolveDir(dir string) string
 }
 
 // Session is one agent run and everything the browser needs to watch it.
@@ -134,6 +142,10 @@ func (m *Manager) Start(req RunRequest) (*Session, error) {
 		req.MaxSteps = 30
 	}
 	req.Approval = string(mode)
+	// Record where this will actually run, not what was asked for. An empty
+	// Dir means "the current workspace", and a session that reports blank for
+	// the one field saying which folder an agent edited is no use afterwards.
+	req.Dir = m.be.ResolveDir(req.Dir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{

@@ -139,6 +139,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/bootstrap", s.handleBootstrap)
+	mux.HandleFunc("POST /api/workspace", s.handleSetWorkspace)
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
@@ -154,6 +155,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/providers", s.handleProviders)
 	mux.HandleFunc("POST /api/providers/reset", s.handleResetHealth)
 	mux.HandleFunc("GET /api/usage", s.handleUsage)
+
+	mux.HandleFunc("GET /icon-192.png", s.icon(192, false))
+	mux.HandleFunc("GET /icon-512.png", s.icon(512, false))
+	mux.HandleFunc("GET /icon-maskable-512.png", s.icon(512, true))
+	mux.HandleFunc("GET /favicon.ico", s.favicon)
 
 	mux.Handle("/", s.static())
 	return noStoreAPI(mux)
@@ -184,8 +190,40 @@ func (s *Server) static() http.Handler {
 		// free over loopback and beats shipping an upgrade the browser quietly
 		// ignores. ETag still makes the common case a 304.
 		w.Header().Set("Cache-Control", "no-cache")
+		// Go's mime table has no entry for .webmanifest, so it sniffs the file
+		// as text/plain — and a manifest served as text/plain is ignored,
+		// which silently costs installability.
+		if strings.HasSuffix(clean, ".webmanifest") {
+			w.Header().Set("Content-Type", "application/manifest+json")
+		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+// icon serves a rasterised mark. These are drawn, not stored, so they are the
+// one thing here worth letting the browser keep for a while.
+func (s *Server) icon(size int, maskable bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b, err := IconPNG(size, maskable)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(b)
+	}
+}
+
+func (s *Server) favicon(w http.ResponseWriter, r *http.Request) {
+	b, err := IconICO(16, 32, 48)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/x-icon")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(b)
 }
 
 // noStoreAPI keeps API responses out of the browser cache. A cached
@@ -267,6 +305,26 @@ func intParam(r *http.Request, name string, def int) int {
 
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.be.Bootstrap())
+}
+
+func (s *Server) handleSetWorkspace(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Dir string `json:"dir"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request body")
+		return
+	}
+	if strings.TrimSpace(body.Dir) == "" {
+		writeErr(w, http.StatusBadRequest, "dir is required")
+		return
+	}
+	view, err := s.be.SetWorkspace(body.Dir)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {

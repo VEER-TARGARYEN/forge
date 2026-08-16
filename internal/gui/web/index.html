@@ -5,8 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>FORGE</title>
+<meta name="theme-color" content="#0d1513">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="FORGE">
 <link rel="stylesheet" href="/app.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23cbffc3'/><path d='M10 22V10h11M10 16h8' stroke='%230a3910' stroke-width='2.6' fill='none' stroke-linecap='round'/></svg>">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
 </head>
 <body>
 <div id="app">
@@ -31,6 +38,7 @@
     <header id="topbar">
       <div class="crumbs" id="crumbs"></div>
       <div class="grow"></div>
+      <button class="chip" id="ws-chip" style="max-width:280px;cursor:pointer"></button>
       <button class="btn btn-ghost btn-sm" id="palette-btn">
         <span data-icon="search"></span> Search <span class="kbd">&#8984;K</span>
       </button>

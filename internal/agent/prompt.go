@@ -51,6 +51,19 @@ Rules:
   the workspace root, exactly as it appears in the repository map or in a tool
   result. Never invent a path, and never send a block for a file you have not
   seen listed or read.
+- To create a file that does not exist yet, use its intended path with an empty
+  SEARCH section. For example, to create greet.go:
+
+  greet.go
+  <<<<<<< SEARCH
+  =======
+  package main
+
+  func Greet(name string) string { return "Hello, " + name }
+  >>>>>>> REPLACE
+
+- Showing code in a plain fenced markdown block does nothing at all. Code
+  only reaches disk through a block in this exact format, or a tool call.
 - SEARCH must match the file character for character, including indentation.
   Read the file first and copy from what you read.
 - Keep each block small: the lines that change, plus just enough surrounding

@@ -16,3 +16,8 @@ bench-*.json
 .idea/
 *.swp
 .DS_Store
+# Staged by mkdist immediately before the installer is compiled, and cleared
+# straight after. A committed copy would be a stale binary in the tree.
+/cmd/forge-setup/payload/*
+!/cmd/forge-setup/payload/.gitkeep
+/dist/

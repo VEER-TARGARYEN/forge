@@ -143,6 +143,7 @@ async function render() {
   State.route = parseHash();
   renderNav();
   renderCrumbs();
+  renderWorkspaceChip();
 
   const view = $('#view');
   const { name, params } = State.route;
@@ -191,6 +192,74 @@ function renderNav() {
     items.push(b);
     return items;
   }));
+}
+
+// The workspace bounds everything the agent may touch, so it belongs in the
+// chrome rather than buried in settings — and a desktop launcher cannot pass
+// -dir, which makes changing it from here the only way.
+function openWorkspacePicker() {
+  const cur = State.workspace || '';
+  const panel = el(`<div class="overlay"><div class="overlay-panel" style="max-width:620px">
+    <div class="overlay-head">
+      <div class="t-meta">Workspace</div>
+      <div class="t-section" style="margin-top:6px">Where may the agent act?</div>
+    </div>
+    <div class="overlay-body">
+      <div class="field">
+        <label for="ws-in">Absolute path to a project folder</label>
+        <input class="input t-mono" id="ws-in" spellcheck="false" value="${esc(cur)}">
+      </div>
+      <p class="t-sm dimmer" style="margin:12px 0 0">
+        The agent cannot read or write outside this folder. Point it at one
+        repository — a whole home directory makes the repository map and the
+        search index enormous and slow.
+      </p>
+    </div>
+    <div class="overlay-foot">
+      <button class="btn btn-ghost" data-x="cancel">Cancel</button>
+      <button class="btn btn-primary" data-x="save">Use this folder</button>
+    </div>
+  </div></div>`);
+
+  const input = $('#ws-in', panel);
+  const save = async () => {
+    const dir = input.value.trim();
+    if (!dir) return;
+    const btn = panel.querySelector('[data-x="save"]');
+    btn.disabled = true;
+    try {
+      State.boot = await api('/api/workspace', { method: 'POST', body: JSON.stringify({ dir }) });
+      State.workspace = State.boot.workspace;
+      closeOverlay();
+      toast('Workspace set to ' + State.workspace);
+      render();
+    } catch (e) {
+      toast(e.message, true);
+      btn.disabled = false;
+    }
+  };
+
+  panel.querySelector('[data-x="save"]').onclick = save;
+  panel.querySelector('[data-x="cancel"]').onclick = closeOverlay;
+  panel._keys = e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeOverlay(); }
+    else if (e.key === 'Enter' && document.activeElement === input) { e.preventDefault(); save(); }
+  };
+  document.addEventListener('keydown', panel._keys);
+
+  openOverlay(panel);
+  input.focus();
+  input.select();
+}
+
+function renderWorkspaceChip() {
+  const host = document.getElementById('ws-chip');
+  if (!host) return;
+  const w = State.workspace || '';
+  const short = w.split(/[\\/]/).filter(Boolean).slice(-2).join('/') || 'choose a folder';
+  host.innerHTML = `${icon('folder', 14)}<span class="truncate">${esc(short)}</span>`;
+  host.title = w || 'No workspace selected';
+  host.onclick = openWorkspacePicker;
 }
 
 function renderCrumbs() {
@@ -1025,10 +1094,20 @@ async function viewUsage() {
 
 function viewSettings() {
   const b = State.boot || {};
-  return el(`<div class="page">
+  const standalone = window.matchMedia('(display-mode: standalone)').matches;
+  const page = el(`<div class="page">
     <div class="page-head">
       <h1 class="t-display">Settings</h1>
       <p class="t-body">Read from disk. Edit the config file and restart to change them.</p>
+    </div>
+    <div class="card tight spread" style="margin-bottom:18px">
+      <div class="col" style="gap:3px">
+        <b>${standalone ? 'Installed as an app' : 'Install as a desktop app'}</b>
+        <span class="t-sm dimmer">${standalone
+          ? 'Running in its own window.'
+          : 'Adds FORGE to your Start Menu, Dock, or home screen with its own window.'}</span>
+      </div>
+      <button class="btn btn-primary" id="install-btn" style="display:${installPrompt ? '' : 'none'}">Install</button>
     </div>
     <div class="stack">
       <div class="card tight">${sideRow('Version', b.version || 'dev')}</div>
@@ -1048,6 +1127,18 @@ function viewSettings() {
       </div>
     </div>
   </div>`);
+
+  const btn = $('#install-btn', page);
+  btn.onclick = async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    const { outcome } = await installPrompt.userChoice;
+    // The prompt is single use; a declined one cannot be replayed.
+    installPrompt = null;
+    btn.style.display = 'none';
+    toast(outcome === 'accepted' ? 'FORGE installed' : 'Install dismissed');
+  };
+  return page;
 }
 
 /* ---------- command palette ---------- */
@@ -1139,6 +1230,26 @@ setInterval(() => {
   const e = document.getElementById('s-elapsed');
   if (e) e.textContent = dur(Date.now() - live.session.created);
 }, 1000);
+
+// Register the shell worker so the app is installable and paints while the Go
+// process is still binding its port. Failure is not worth surfacing — it only
+// costs the offline shell, and the app itself works either way.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+
+// Chromium fires this instead of showing its own install affordance. Holding
+// the event lets Settings offer a real button rather than telling the user to
+// hunt through a browser menu.
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  installPrompt = e;
+  const btn = document.getElementById('install-btn');
+  if (btn) btn.style.display = '';
+});
 
 (async function main() {
   try {
