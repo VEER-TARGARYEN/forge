@@ -76,6 +76,17 @@ type Request struct {
 	// "usually valid JSON" into "always valid JSON".
 	JSONSchema map[string]any
 	SchemaName string
+
+	// RetryOnPartial lets the router fail over to another target when a stream
+	// dies after it has already emitted some text.
+	//
+	// Whether that is safe depends entirely on the caller. An agent keeps only
+	// the final response, so a discarded partial costs nothing but some
+	// repeated text on screen — far better than ending a run because one
+	// connection dropped mid-sentence. A proxy that has already flushed those
+	// tokens to an HTTP client cannot take them back, and appending a second
+	// answer would corrupt the response, so it leaves this false.
+	RetryOnPartial bool
 }
 
 // TokenEstimate is a cheap character-based approximation used for context-fit

@@ -154,6 +154,7 @@ type Agent struct {
 	toolSeen    map[string]int
 	blockSeen   map[string]int
 	codeNudges  int
+	emptyTurns  int
 	compactions int
 	tokensSaved int
 }
@@ -299,6 +300,10 @@ var contentBearingTools = map[string]bool{
 // A model that has not taken the hint twice will not take it a third time, and
 // the run should end with an honest "nothing changed" rather than loop.
 const maxCodeNudges = 2
+
+// maxEmptyTurns bounds how many times an empty reply is handed back. A model
+// that answers with nothing three times in a row is not going to start.
+const maxEmptyTurns = 2
 
 // placeholderPath is the slot token in the block instructions. Small models
 // copy it verbatim instead of substituting a real path — naming it here means
@@ -569,6 +574,26 @@ func (a *Agent) Run(ctx context.Context, task string) (*Outcome, error) {
 			}
 		}
 
+		// An empty turn is not a finished one. Reasoning models put their
+		// working in a separate channel that never enters history, and some
+		// spend a whole turn there and return no content at all — which read
+		// as "the model has nothing more to do" and ended the run silently.
+		if strings.TrimSpace(resp.Content) == "" && a.emptyTurns < maxEmptyTurns {
+			a.emptyTurns++
+			a.printf("  ! empty response; asking again\n")
+			hint := "Your last message was empty."
+			if strings.TrimSpace(resp.Reasoning) != "" {
+				hint += " Your reasoning is not visible to anyone and is not saved, " +
+					"so put the answer or the tool call in your reply itself."
+			}
+			a.msgs = append(a.msgs, provider.Message{
+				Role: provider.RoleUser,
+				Content: hint + " Either take the next action, or state plainly what you " +
+					"have done and why the task is complete.",
+			})
+			continue
+		}
+
 		// A turn that shows source in a fence but takes no action is a model
 		// that described an edit instead of making one. Treating that as "I am
 		// finished" is how a run ends reporting success with nothing written —
@@ -694,6 +719,10 @@ func (a *Agent) callModel(ctx context.Context) (*provider.Response, error) {
 		Messages:    a.msgs,
 		Tools:       a.specs(),
 		Temperature: a.cfg.Temperature,
+		// Only the final response enters the conversation, so a stream that
+		// dies half way costs nothing but some repeated text on screen. Losing
+		// the whole run to one dropped connection is the worse trade.
+		RetryOnPartial: true,
 	}, func(c provider.Chunk) error {
 		printer.write(c.Content)
 		if c.Content != "" {

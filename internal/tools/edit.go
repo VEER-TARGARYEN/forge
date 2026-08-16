@@ -438,10 +438,10 @@ func (EditFile) Spec() Spec {
 			"and must be unique unless replace_all is true. Prefer a SEARCH/REPLACE block in your " +
 			"message for anything longer than a line or two.",
 		Schema: obj(map[string]any{
-			"path": str("Path relative to the workspace root."),
-			"old_string": str("Exact text to find, including indentation. " +
-				"Leave it empty to append new_string to the end of the file instead."),
-			"new_string":  str("Text to replace it with, or to append when old_string is empty."),
+			"path": str("Path relative to the workspace root. Parent directories are created as needed."),
+			"old_string": str("Exact text to find, including indentation. Leave it empty to " +
+				"append new_string to the end of the file, or to create the file if it does not exist."),
+			"new_string":  str("Text to replace it with, to append, or the whole contents of a new file."),
 			"replace_all": boolean("Replace every occurrence instead of requiring uniqueness."),
 		}, "path", "new_string"),
 	}
@@ -540,8 +540,17 @@ func (EditFile) Run(ctx context.Context, raw json.RawMessage, env *Env) (*Result
 		return Errorf("%v", err), nil
 	}
 	raw2, err := os.ReadFile(abs)
+	exists := err == nil
+	// An empty old_string on a file that is not there yet means "create it".
+	// That is the same intent as appending, applied to nothing, and it is what
+	// a model means when it asks to edit src/main/java/Calculator.java in a
+	// tree that has no src directory. Refusing sent it off to run mkdir and
+	// list_dir until the step budget ran out, having written nothing.
 	if err != nil {
-		return Errorf("read %s: %v", a.Path, err), nil
+		if !(os.IsNotExist(err) && a.OldString == "") {
+			return Errorf("read %s: %v", a.Path, err), nil
+		}
+		raw2 = nil
 	}
 	crlf := strings.Contains(string(raw2), "\r\n")
 	old := strings.ReplaceAll(string(raw2), "\r\n", "\n")
@@ -580,17 +589,23 @@ func (EditFile) Run(ctx context.Context, raw json.RawMessage, env *Env) (*Result
 	}
 
 	added, removed := diff.Summary(old, updated)
+	verb, past := "edit", "Edited"
+	if !exists {
+		verb, past = "create", "Created"
+	}
 	if err := env.Approver.Approve(ApprovalRequest{
 		Tool:    "edit_file",
 		Kind:    "edit",
-		Summary: fmt.Sprintf("edit %s (+%d -%d)", a.Path, added, removed),
+		Summary: fmt.Sprintf("%s %s (+%d -%d)", verb, a.Path, added, removed),
 		Detail:  diff.Unified(a.Path, old, updated, 3),
 		Path:    a.Path,
-		Risky:   true,
+		// Creating a file destroys nothing, so it does not need the stronger
+		// confirmation that overwriting existing work does.
+		Risky: exists,
 	}); err != nil {
 		return Errorf("declined: %v", err), nil
 	}
-	env.noteSnapshot(env.WS.Rel(abs), raw2, true)
+	env.noteSnapshot(env.WS.Rel(abs), raw2, exists)
 	if err := writeBack(abs, updated, crlf); err != nil {
 		return Errorf("%v", err), nil
 	}
@@ -599,11 +614,11 @@ func (EditFile) Run(ctx context.Context, raw json.RawMessage, env *Env) (*Result
 	if a.ReplaceAll && occurrences > 1 {
 		occ = fmt.Sprintf(" (%d occurrences)", occurrences)
 	}
-	if a.OldString == "" {
+	if a.OldString == "" && exists {
 		occ = " (appended)"
 	}
 	return &Result{
-		Content: fmt.Sprintf("Edited %s: +%d -%d lines%s.", a.Path, added, removed, occ),
-		Display: fmt.Sprintf("edit %s (+%d -%d)%s", a.Path, added, removed, occ),
+		Content: fmt.Sprintf("%s %s: +%d -%d lines%s.", past, a.Path, added, removed, occ),
+		Display: fmt.Sprintf("%s %s (+%d -%d)%s", verb, a.Path, added, removed, occ),
 	}, nil
 }

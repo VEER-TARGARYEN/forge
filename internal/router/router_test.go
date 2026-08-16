@@ -302,3 +302,99 @@ func TestHealthPersistsAcrossRestart(t *testing.T) {
 		t.Errorf("restored cooldown = %v, want > 0", left)
 	}
 }
+
+// A target with room for a useful reply must be used, with its reply budget
+// trimmed to fit — not thrown away because the configured max_tokens happens
+// not to fit alongside the prompt.
+//
+// The bug this pins: a ~4,100 token prompt against an 8,192 window was skipped
+// as "needs ~4110 tok > 8192 window" because the default 4,096 max_tokens was
+// added to the prompt first. There were 4,082 tokens of room. The local model
+// — the one target that never runs out of quota — was unusable exactly when
+// every hosted target had.
+func TestTrimsReplyBudgetInsteadOfSkipping(t *testing.T) {
+	var hits int32
+	var gotMaxTokens int32 = -1
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			fmt.Fprint(w, `{"data":[{"id":"m"}]}`)
+			return
+		}
+		atomic.AddInt32(&hits, 1)
+		raw, _ := io.ReadAll(r.Body)
+		var probe struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		_ = json.Unmarshal(raw, &probe)
+		atomic.StoreInt32(&gotMaxTokens, int32(probe.MaxTokens))
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],`+
+			`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer srv.Close()
+
+	// A 1000-token window, and a prompt big enough that the requested 4096
+	// tokens of output cannot also fit.
+	cfg := testConfig(t,
+		[]config.Target{{Provider: "local", Model: "m", MaxContext: 1000}},
+		[]config.Provider{{Name: "local", BaseURL: srv.URL + "/v1", APIKey: "k"}})
+	rt, _ := newTestRouter(t, cfg)
+
+	resp, err := rt.Chat(context.Background(), "coder", provider.Request{
+		Messages:  []provider.Message{{Role: provider.RoleUser, Content: strings.Repeat("token ", 200)}},
+		MaxTokens: 4096,
+	})
+	if err != nil {
+		t.Fatalf("chat: %v (the target should have been used with a trimmed budget)", err)
+	}
+	if resp.Provider != "local" {
+		t.Errorf("served by %q, want %q", resp.Provider, "local")
+	}
+	if hits != 1 {
+		t.Fatalf("hits = %d, want 1", hits)
+	}
+	got := int(atomic.LoadInt32(&gotMaxTokens))
+	if got <= 0 || got >= 4096 {
+		t.Errorf("max_tokens sent = %d, want it trimmed below the requested 4096", got)
+	}
+	if got < minReplyTokens {
+		t.Errorf("max_tokens sent = %d, below the %d floor a call is worth making at",
+			got, minReplyTokens)
+	}
+}
+
+// The floor still holds: a window with no useful room left is skipped rather
+// than dialled for a truncated answer.
+func TestSkipsWhenNoUsefulReplyRoomRemains(t *testing.T) {
+	var hits int32
+	tiny := stubServer(200, "", "", &hits)
+	defer tiny.Close()
+	var okHits int32
+	good := stubServer(200, "", "", &okHits)
+	defer good.Close()
+
+	cfg := testConfig(t,
+		[]config.Target{
+			{Provider: "tiny", Model: "m", MaxContext: 300},
+			{Provider: "good", Model: "m"},
+		},
+		[]config.Provider{
+			{Name: "tiny", BaseURL: tiny.URL + "/v1", APIKey: "k"},
+			{Name: "good", BaseURL: good.URL + "/v1", APIKey: "k"},
+		})
+	rt, _ := newTestRouter(t, cfg)
+
+	resp, err := rt.Chat(context.Background(), "coder", provider.Request{
+		Messages:  []provider.Message{{Role: provider.RoleUser, Content: strings.Repeat("token ", 200)}},
+		MaxTokens: 256,
+	})
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if resp.Provider != "good" {
+		t.Errorf("served by %q, want %q", resp.Provider, "good")
+	}
+	if hits != 0 {
+		t.Errorf("the too-small target was dialled %d times, want 0", hits)
+	}
+}

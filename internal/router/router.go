@@ -66,6 +66,21 @@ func (r *Router) Resolve(class string) ([]config.Target, error) {
 	return targets, nil
 }
 
+// minReplyTokens is the least amount of output room that makes a call worth
+// making. Below this the model cannot finish a sentence, let alone a tool call
+// or an edit block, so the round trip only burns quota to produce a truncated
+// answer the loop then has to discard.
+const minReplyTokens = 512
+
+// windowMargin is slack held back from a context window to absorb error in the
+// prompt estimate, which counts characters rather than tokenising for real.
+func windowMargin(window int) int {
+	if m := window / 20; m > 128 {
+		return m
+	}
+	return 128
+}
+
 // ClassContext reports the largest declared context window among a class's
 // usable targets, or 0 when nothing is configured or no window is declared.
 //
@@ -188,18 +203,38 @@ func (r *Router) run(ctx context.Context, class string, req provider.Request, on
 			r.emit(Event{Kind: "skip", Class: class, Provider: t.Provider, Model: t.Model, Detail: reason, Cooldown: left})
 			continue
 		}
-		// Reserve headroom for the reply; a target whose window cannot hold
-		// prompt + output is not worth a round trip.
-		if t.MaxContext > 0 && estTokens+r.outputBudget(t, req) > t.MaxContext {
-			reason := fmt.Sprintf("needs ~%d tok > %d window", estTokens, t.MaxContext)
-			routeErr.Attempts = append(routeErr.Attempts, Attempt{Target: t, Skip: reason})
-			r.emit(Event{Kind: "skip", Class: class, Provider: t.Provider, Model: t.Model, Detail: reason})
-			continue
-		}
-
 		attemptReq := req
 		if t.MaxTokens > 0 {
 			attemptReq.MaxTokens = t.MaxTokens
+		}
+
+		// Fit the reply budget to what is actually left, rather than refusing
+		// the target because the *configured* reply size does not fit.
+		//
+		// A 4,110-token prompt against an 8,192-token window has 4,082 tokens
+		// of room — ample to write a file — but a default max_tokens of 4,096
+		// made the sum 8,206 and the target was skipped. That is how a local
+		// model with plenty of space became "no usable target" the moment the
+		// hosted ones ran out of quota, which is precisely the situation it
+		// exists to cover.
+		if t.MaxContext > 0 {
+			// The prompt figure is an estimate, so filling the window to the
+			// last token invites the provider to truncate a reply that was
+			// predicted to fit. Hold a little back.
+			room := t.MaxContext - estTokens - windowMargin(t.MaxContext)
+			if room < minReplyTokens {
+				reason := fmt.Sprintf("prompt ~%d tok leaves only %d of %d window for the reply",
+					estTokens, max(room, 0), t.MaxContext)
+				routeErr.Attempts = append(routeErr.Attempts, Attempt{Target: t, Skip: reason})
+				r.emit(Event{Kind: "skip", Class: class, Provider: t.Provider, Model: t.Model, Detail: reason})
+				continue
+			}
+			if want := r.outputBudget(t, req); want > room {
+				attemptReq.MaxTokens = room
+				r.emit(Event{Kind: "skip", Class: class, Provider: t.Provider, Model: t.Model,
+					Detail: fmt.Sprintf("reply budget trimmed %d -> %d to fit the %d window",
+						want, room, t.MaxContext)})
+			}
 		}
 
 		retries := r.cfg.Policy.SameTargetRetries
@@ -283,11 +318,18 @@ func (r *Router) run(ctx context.Context, class string, req provider.Request, on
 			r.emit(Event{Kind: "failure", Class: class, Provider: t.Provider, Model: t.Model,
 				Attempt: attemptNo, Detail: callErr.Error(), Cooldown: cd})
 
-			// Partial output already reached the caller; falling through to
-			// another provider would concatenate two different answers.
+			// Partial output already reached the caller. Whether another target
+			// may be tried is the caller's call: appending a second answer to
+			// tokens already flushed to an HTTP client corrupts the response,
+			// but an agent that keeps only the final message loses nothing.
 			if emitted {
 				routeErr.Attempts = append(routeErr.Attempts, Attempt{Target: t, Err: callErr, Kind: kind})
-				return nil, fmt.Errorf("stream failed after partial output from %s: %w", t.Key(), callErr)
+				if !req.RetryOnPartial {
+					return nil, fmt.Errorf("stream failed after partial output from %s: %w", t.Key(), callErr)
+				}
+				r.emit(Event{Kind: "skip", Class: class, Provider: t.Provider, Model: t.Model,
+					Detail: "stream broke after partial output; discarding it and trying the next target"})
+				break // move to the next target rather than retrying this one
 			}
 
 			if kind.Retryable() && try < retries {
