@@ -104,6 +104,22 @@ func runOne(ctx context.Context, root string, c Check, opts Options) CheckResult
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 
+	// Two separate guards, because a hung check has two ways to outlive its
+	// deadline.
+	//
+	// Cancel kills the whole process group rather than just the shell we
+	// started, so the command the shell forked actually dies.
+	//
+	// WaitDelay bounds Wait itself. Writing to a bytes.Buffer means Go copies
+	// through an os.Pipe, and Wait will not return while any process still
+	// holds the write end — so a grandchild that escaped the kill would
+	// otherwise block us for as long as it runs. Without this the timeout
+	// silently waits out the very process it timed out on: 135/136 on Linux,
+	// and green on Windows, which is exactly how it stayed hidden.
+	setupProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	cmd.WaitDelay = 2 * time.Second
+
 	start := time.Now()
 	err := cmd.Run()
 	res := CheckResult{Check: c, Duration: time.Since(start), Output: buf.String()}
