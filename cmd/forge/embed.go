@@ -15,6 +15,7 @@ func cmdEmbed(args []string) error {
 	fs := flag.NewFlagSet("embed", flag.ExitOnError)
 	modelDir := fs.String("model", "", "path to a HuggingFace model directory")
 	bench := fs.Bool("bench", false, "measure kernel throughput without loading a model")
+	repeats := fs.Int("repeats", 3, "benchmark repetitions")
 	maxTokens := fs.Int("max-tokens", 256, "truncate input to this many tokens")
 	showVec := fs.Bool("vector", false, "print the full vector, not just a summary")
 	if err := fs.Parse(args); err != nil {
@@ -24,7 +25,9 @@ func cmdEmbed(args []string) error {
 	if *bench {
 		fmt.Printf("encoder kernels at all-MiniLM-L6-v2 dimensions (384 hidden, 1536 ffn, 6 layers)\n")
 		fmt.Printf("host: %s/%s, %d logical CPUs\n\n", runtime.GOOS, runtime.GOARCH, runtime.NumCPU())
-		embed.Benchmark(embed.MiniLMBench(), os.Stdout)
+		cfg := embed.MiniLMBench()
+		cfg.Repeats = *repeats
+		embed.Benchmark(cfg, os.Stdout)
 		fmt.Printf("\nNo model weights are needed for this: a matmul costs the same\n" +
 			"regardless of the values in it.\n")
 		return nil
