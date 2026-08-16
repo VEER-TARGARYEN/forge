@@ -1,0 +1,22 @@
+# Normalise to LF in the repository, and let checkout decide locally.
+* text=auto
+
+# install.sh is fetched straight from raw.githubusercontent.com and piped into
+# a shell. A CRLF copy fails with a confusing "bad interpreter" error on every
+# Unix machine, so it is pinned regardless of anyone's core.autocrlf setting.
+*.sh text eol=lf
+
+# Go tooling assumes LF; gofmt rewrites CRLF files, which would make the
+# release workflow's format check fail on a Windows-authored commit.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+
+# PowerShell is happy either way, but CRLF is what Windows editors expect.
+*.ps1 text eol=crlf
+
+# Never let these be mangled by line-ending conversion.
+*.png binary
+*.ico binary
+*.icns binary
+*.safetensors binary
