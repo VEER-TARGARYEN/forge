@@ -51,6 +51,10 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          # A workflow_dispatch run has no tag context, so the tag is named
+          # explicitly. Without this the whole build succeeds and then throws
+          # away its artifacts with "GitHub Releases requires a tag".
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
           files: |
             dist/*
           generate_release_notes: true
