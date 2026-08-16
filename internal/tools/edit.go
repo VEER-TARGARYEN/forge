@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -291,6 +293,27 @@ func applyOne(b Block, env *Env) BlockResult {
 		updated = b.Replace
 
 	case !exists:
+		// A model that copied the placeholder path out of the prompt will
+		// repeat the mistake for as many steps as it is given, because
+		// "use an empty SEARCH section" reads as permission to create the
+		// file it just invented. Naming the file it almost certainly meant
+		// ends the loop in one turn.
+		if near := nearestByBase(env, b.Path); near != "" {
+			res.Message = fmt.Sprintf(
+				"%s does not exist. Did you mean %s? Use the real path relative to the workspace root.",
+				b.Path, near)
+			return res
+		}
+		// Naming real files is what actually breaks the loop. Told only that a
+		// path is missing, a model re-sends the same invented path every turn;
+		// given the candidates, it picks one immediately.
+		if real := someFiles(env, 10); len(real) > 0 {
+			res.Message = fmt.Sprintf(
+				"%s does not exist. Existing files: %s. Use one of these paths, "+
+					"or an empty SEARCH section if you truly mean to create a new file.",
+				b.Path, strings.Join(real, ", "))
+			return res
+		}
 		res.Message = fmt.Sprintf("%s does not exist. To create it, use a block with an empty SEARCH section.", b.Path)
 		return res
 
@@ -409,12 +432,68 @@ func (EditFile) Spec() Spec {
 			"and must be unique unless replace_all is true. Prefer a SEARCH/REPLACE block in your " +
 			"message for anything longer than a line or two.",
 		Schema: obj(map[string]any{
-			"path":        str("Path relative to the workspace root."),
-			"old_string":  str("Exact text to find, including indentation."),
-			"new_string":  str("Text to replace it with."),
+			"path": str("Path relative to the workspace root."),
+			"old_string": str("Exact text to find, including indentation. " +
+				"Leave it empty to append new_string to the end of the file instead."),
+			"new_string":  str("Text to replace it with, or to append when old_string is empty."),
 			"replace_all": boolean("Replace every occurrence instead of requiring uniqueness."),
-		}, "path", "old_string", "new_string"),
+		}, "path", "new_string"),
 	}
+}
+
+// nearestByBase finds the one file in the workspace whose name matches the
+// base of a path that does not exist. It returns "" when there is no match or
+// more than one, so the caller never suggests a guess it cannot stand behind.
+func nearestByBase(env *Env, p string) string {
+	base := path.Base(filepath.ToSlash(p))
+	if base == "" || base == "." || base == "/" {
+		return ""
+	}
+	found := ""
+	_ = filepath.WalkDir(env.WS.Root(), func(abs string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if SkipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != base {
+			return nil
+		}
+		if found != "" {
+			found = "" // ambiguous
+			return filepath.SkipAll
+		}
+		found = env.WS.Rel(abs)
+		return nil
+	})
+	return found
+}
+
+// someFiles lists up to n workspace-relative file paths, for grounding an
+// error message in what actually exists.
+func someFiles(env *Env, n int) []string {
+	var out []string
+	_ = filepath.WalkDir(env.WS.Root(), func(abs string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if SkipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		out = append(out, env.WS.Rel(abs))
+		if len(out) >= n {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return out
 }
 
 func (EditFile) Mutates() bool { return true }
@@ -425,11 +504,29 @@ func (EditFile) Run(ctx context.Context, raw json.RawMessage, env *Env) (*Result
 		OldString  string `json:"old_string"`
 		NewString  string `json:"new_string"`
 		ReplaceAll bool   `json:"replace_all"`
+
+		// Models reach for the SEARCH/REPLACE vocabulary they were taught
+		// elsewhere in the prompt. The spelling differs; the meaning does not.
+		Search  string `json:"search"`
+		Replace string `json:"replace"`
 	}
 	if err := ParseArgs(raw, &a); err != nil {
 		return Errorf("%v", err), nil
 	}
-	if a.OldString == a.NewString {
+	if a.OldString == "" {
+		a.OldString = a.Search
+	}
+	if a.NewString == "" {
+		a.NewString = a.Replace
+	}
+
+	if a.OldString == "" && a.NewString == "" {
+		return Errorf(
+			"edit_file needs old_string (the exact existing text) and new_string. "+
+				"Got neither for %s. Required arguments: path, old_string, new_string.",
+			a.Path), nil
+	}
+	if a.OldString != "" && a.OldString == a.NewString {
 		return Errorf("old_string and new_string are identical; nothing to do"), nil
 	}
 	abs, err := env.WS.Resolve(a.Path)
@@ -443,20 +540,37 @@ func (EditFile) Run(ctx context.Context, raw json.RawMessage, env *Env) (*Result
 	crlf := strings.Contains(string(raw2), "\r\n")
 	old := strings.ReplaceAll(string(raw2), "\r\n", "\n")
 	needle := strings.ReplaceAll(a.OldString, "\r\n", "\n")
+	insert := strings.ReplaceAll(a.NewString, "\r\n", "\n")
 
-	n := strings.Count(old, needle)
+	var updated string
+	occurrences := 0
 	switch {
-	case n == 0:
-		return Errorf("old_string not found in %s. Read the file and copy the exact text.", a.Path), nil
-	case n > 1 && !a.ReplaceAll:
-		return Errorf("old_string matches %d places in %s. Add surrounding context, or set replace_all.", n, a.Path), nil
-	}
+	// Empty old_string with real new_string means append. Every model tries
+	// this — adding a function to a file is the single most common edit, and
+	// there was no other way to express it: write_file forces the whole file
+	// back through JSON escaping, which small models cannot do reliably.
+	// Appending cannot destroy anything, and the undo journal covers it.
+	case a.OldString == "":
+		sep := "\n"
+		if old == "" || strings.HasSuffix(old, "\n") {
+			sep = ""
+		}
+		updated = old + sep + insert
 
-	updated := old
-	if a.ReplaceAll {
-		updated = strings.ReplaceAll(old, needle, strings.ReplaceAll(a.NewString, "\r\n", "\n"))
-	} else {
-		updated = strings.Replace(old, needle, strings.ReplaceAll(a.NewString, "\r\n", "\n"), 1)
+	default:
+		n := strings.Count(old, needle)
+		occurrences = n
+		switch {
+		case n == 0:
+			return Errorf("old_string not found in %s. Read the file and copy the exact text.", a.Path), nil
+		case n > 1 && !a.ReplaceAll:
+			return Errorf("old_string matches %d places in %s. Add surrounding context, or set replace_all.", n, a.Path), nil
+		}
+		if a.ReplaceAll {
+			updated = strings.ReplaceAll(old, needle, insert)
+		} else {
+			updated = strings.Replace(old, needle, insert, 1)
+		}
 	}
 
 	added, removed := diff.Summary(old, updated)
@@ -476,8 +590,11 @@ func (EditFile) Run(ctx context.Context, raw json.RawMessage, env *Env) (*Result
 	}
 	env.noteChange(env.WS.Rel(abs))
 	occ := ""
-	if a.ReplaceAll && n > 1 {
-		occ = fmt.Sprintf(" (%d occurrences)", n)
+	if a.ReplaceAll && occurrences > 1 {
+		occ = fmt.Sprintf(" (%d occurrences)", occurrences)
+	}
+	if a.OldString == "" {
+		occ = " (appended)"
 	}
 	return &Result{
 		Content: fmt.Sprintf("Edited %s: +%d -%d lines%s.", a.Path, added, removed, occ),

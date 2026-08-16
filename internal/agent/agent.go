@@ -139,6 +139,7 @@ type Agent struct {
 	usage       provider.Usage
 	changed     map[string]bool
 	toolSeen    map[string]int
+	blockSeen   map[string]int
 	compactions int
 	tokensSaved int
 }
@@ -172,8 +173,9 @@ func New(rt *router.Router, reg *tools.Registry, env *tools.Env, cfg Config, out
 	cfg.applyDefaults()
 	a := &Agent{
 		rt: rt, reg: reg, env: env, cfg: cfg, out: out,
-		changed:  map[string]bool{},
-		toolSeen: map[string]int{},
+		changed:   map[string]bool{},
+		toolSeen:  map[string]int{},
+		blockSeen: map[string]int{},
 	}
 	// Tools report their own mutations rather than the agent inferring them
 	// from arguments, so a partial or redirected write is still recorded.
@@ -266,13 +268,58 @@ func (a *Agent) maybeCompact(ctx context.Context, force bool) {
 // compact.
 func (a *Agent) Messages() []provider.Message { return a.msgs }
 
+// Tools that carry file content as a JSON string. Blocks mode exists to keep
+// code out of JSON entirely, so offering any of these defeats it — a weak
+// model will reach for the tool no matter what the prompt says, then fail on
+// escaping. write_file is the worse of the two: it puts a whole file through
+// the escaper rather than one hunk.
+var contentBearingTools = map[string]bool{
+	"edit_file":  true,
+	"write_file": true,
+}
+
+// blockLoopLimit is how many times the same block may fail the same way
+// before the run is called off. Three is enough to distinguish a model
+// correcting itself from one that cannot.
+const blockLoopLimit = 3
+
+// trackBlockFailures counts identical (path, error) block failures and returns
+// a stop reason once one repeats past the limit. A successful block clears the
+// count for its path: progress means the model is still steerable.
+func (a *Agent) trackBlockFailures(results []tools.BlockResult) string {
+	for _, r := range results {
+		key := r.Block.Path + "\x00" + r.Message
+		if r.OK {
+			delete(a.blockSeen, key)
+			continue
+		}
+		a.blockSeen[key]++
+		if a.blockSeen[key] >= blockLoopLimit {
+			return fmt.Sprintf(
+				"model repeated the same failing edit to %s %d times (%s); "+
+					"it is not acting on the error, so stopping rather than burning the step budget",
+				r.Block.Path, a.blockSeen[key], r.Message)
+		}
+	}
+	return ""
+}
+
+// visibleTool reports whether the model was actually offered this tool. Text
+// recovery must use this rather than the registry: validating against every
+// registered name would hand back the JSON path that blocks mode just took
+// away.
+func (a *Agent) visibleTool(name string) bool {
+	if !a.reg.Has(name) {
+		return false
+	}
+	return !(a.cfg.Protocol == ProtoBlocks && contentBearingTools[name])
+}
+
 func (a *Agent) specs() []provider.Tool {
 	specs := a.reg.Specs()
 	out := make([]provider.Tool, 0, len(specs))
 	for _, s := range specs {
-		// In pure-blocks mode edit_file is hidden, so a weak model is not
-		// tempted into the JSON path it handles badly.
-		if a.cfg.Protocol == ProtoBlocks && s.Name == "edit_file" {
+		if !a.visibleTool(s.Name) {
 			continue
 		}
 		out = append(out, provider.Tool{
@@ -369,6 +416,15 @@ func (a *Agent) Run(ctx context.Context, task string) (*Outcome, error) {
 				outcome.StopReason = "aborted by user"
 				break
 			}
+			// Tool calls have a repeat guard; edit blocks did not. A weak model
+			// that cannot act on a rejection re-sends the identical block until
+			// the step budget runs out — ten turns and six minutes of CPU to
+			// learn nothing. Stop as soon as the loop is unmistakable.
+			if stuck := a.trackBlockFailures(results); stuck != "" {
+				a.printf("  ! %s\n", stuck)
+				outcome.StopReason = stuck
+				break
+			}
 			a.msgs = append(a.msgs, provider.Message{
 				Role: provider.RoleUser, Content: tools.FormatBlockResults(results),
 			})
@@ -384,6 +440,57 @@ func (a *Agent) Run(ctx context.Context, task string) (*Outcome, error) {
 					"\n\nResend them in the exact SEARCH/REPLACE format.",
 			})
 			continue
+		}
+
+		// A small model will often write the tool call out as text instead of
+		// calling it — qwen2.5-coder:3b does this almost every turn. The intent
+		// is unambiguous, so honour it rather than mistaking a described action
+		// for a finished one. Only reachable when the turn produced no real
+		// call and no edit block, and only for names actually registered.
+		if recovered := provider.ParseTextToolCalls(resp.Content, a.visibleTool); len(recovered) > 0 {
+			for i := range recovered {
+				recovered[i].ID = fmt.Sprintf("text_%d_%d", step, i)
+			}
+			a.printf("  ! model wrote %d tool call(s) as text; executing them\n", len(recovered))
+
+			// Rewrite the turn just recorded so it carries the calls. Tool
+			// results must pair with a tool_calls field on the preceding
+			// assistant message or the next request is rejected outright.
+			last := &a.msgs[len(a.msgs)-1]
+			last.Content = ""
+			last.ToolCalls = recovered
+
+			stop, err := a.runToolCalls(ctx, recovered)
+			if err != nil {
+				return a.finish(outcome, start, "aborted"), err
+			}
+			if stop != "" {
+				outcome.StopReason = stop
+				break
+			}
+			continue
+		}
+
+		// In blocks mode a model that reaches for the hidden edit tools has
+		// not finished — it has picked a door that is not there. Say so.
+		// Otherwise the turn reads as a final answer and the run stops having
+		// changed nothing, which is exactly the failure this protocol exists
+		// to prevent.
+		if a.cfg.Protocol == ProtoBlocks {
+			wanted := provider.ParseTextToolCalls(resp.Content, func(n string) bool {
+				return contentBearingTools[n] && a.reg.Has(n)
+			})
+			if len(wanted) > 0 {
+				a.printf("  ! model asked for a tool blocks mode hides; redirecting\n")
+				a.msgs = append(a.msgs, provider.Message{
+					Role: provider.RoleUser,
+					Content: "There is no " + wanted[0].Function.Name + " tool available. " +
+						"Express file changes as SEARCH/REPLACE blocks in your message, " +
+						"in exactly the format described in the system prompt. " +
+						"Read the file first and copy the SEARCH lines from what you read.",
+				})
+				continue
+			}
 		}
 
 		// The model believes it is finished. Before accepting that, run the

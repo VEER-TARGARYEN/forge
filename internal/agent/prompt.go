@@ -39,7 +39,7 @@ const blockSpec = `EDITING FILES — SEARCH/REPLACE blocks
 
 Write edits directly in your message, not as tool arguments. Use exactly this shape:
 
-path/to/file.go
+FILE_PATH_GOES_HERE
 <<<<<<< SEARCH
 the exact existing lines
 =======
@@ -47,6 +47,10 @@ the replacement lines
 >>>>>>> REPLACE
 
 Rules:
+- Replace FILE_PATH_GOES_HERE with the real path of a real file, relative to
+  the workspace root, exactly as it appears in the repository map or in a tool
+  result. Never invent a path, and never send a block for a file you have not
+  seen listed or read.
 - SEARCH must match the file character for character, including indentation.
   Read the file first and copy from what you read.
 - Keep each block small: the lines that change, plus just enough surrounding

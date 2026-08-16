@@ -82,10 +82,14 @@ func (p *Policy) Decide(req tools.ApprovalRequest, interactive bool) Verdict {
 		return Verdict{Deny, fmt.Sprintf("approval mode is readonly; %s is not permitted", req.Tool)}
 
 	case Yolo:
-		if !req.Risky {
+		// Yolo must be a superset of auto-edit. File edits carry Risky so that
+		// Ask mode shows a diff, but they are journaled and reversible with
+		// `forge undo` — gating them here made yolo *weaker* than auto-edit and
+		// left the agent unable to edit anything non-interactively.
+		if req.Kind == "write" || req.Kind == "edit" || !req.Risky {
 			return Verdict{Allow, "auto (yolo)"}
 		}
-		// Destructive operations prompt even here, by design.
+		// Genuinely destructive operations — risky commands — still prompt.
 
 	case AutoEdit:
 		if req.Kind == "write" || req.Kind == "edit" {

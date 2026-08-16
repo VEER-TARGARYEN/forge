@@ -65,6 +65,11 @@ type Policy struct {
 	ServerCooldownSec     int `json:"server_cooldown_sec"`
 	BadRequestCooldownSec int `json:"bad_request_cooldown_sec"`
 	MaxCooldownSec        int `json:"max_cooldown_sec"`
+	// ModelNotFoundCooldownSec is deliberately short. A missing model is a
+	// fixable local condition — most often weights that have not been pulled
+	// yet — so the target should be re-checked on the next run rather than
+	// suppressed for a day like a bad credential.
+	ModelNotFoundCooldownSec int `json:"model_not_found_cooldown_sec"`
 	// SameTargetRetries is how many times to retry a transient failure on the
 	// same target before moving down the chain.
 	SameTargetRetries int `json:"same_target_retries"`
@@ -230,6 +235,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Policy.ServerCooldownSec == 0 {
 		c.Policy.ServerCooldownSec = 30
+	}
+	if c.Policy.ModelNotFoundCooldownSec == 0 {
+		c.Policy.ModelNotFoundCooldownSec = 60
 	}
 	if c.Policy.BadRequestCooldownSec == 0 {
 		c.Policy.BadRequestCooldownSec = 600

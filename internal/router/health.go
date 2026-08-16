@@ -172,10 +172,17 @@ func (h *Health) cooldownFor(kind provider.ErrKind, fails int, retryAfter time.D
 	case provider.ErrQuota:
 		// Daily quota: do not exponentiate, just wait it out.
 		return time.Duration(h.policy.QuotaCooldownSec) * time.Second
-	case provider.ErrAuth, provider.ErrModelNotFound:
+	case provider.ErrAuth:
 		// Structural misconfiguration. Park it for the day and let
 		// `forge doctor` surface the reason.
 		return time.Duration(h.policy.AuthCooldownSec) * time.Second
+	case provider.ErrModelNotFound:
+		// A missing model is not a missing credential. On a local backend it
+		// usually means the weights have not been pulled yet, which is fixed
+		// in minutes — parking the target for a day then hides the model that
+		// has since arrived, and the run fails for a reason that is no longer
+		// true. Sit out the current run and re-check on the next one.
+		return time.Duration(h.policy.ModelNotFoundCooldownSec) * time.Second
 	case provider.ErrBadRequest:
 		return time.Duration(h.policy.BadRequestCooldownSec) * time.Second
 	case provider.ErrServer, provider.ErrNetwork, provider.ErrTimeout:

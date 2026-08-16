@@ -168,6 +168,14 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	return t, ok
 }
 
+// Has reports whether a name is registered. Callers that only need to
+// validate a name — recovering a tool call from message text, for one —
+// should not have to hold a Tool they will never invoke.
+func (r *Registry) Has(name string) bool {
+	_, ok := r.byName[name]
+	return ok
+}
+
 func (r *Registry) Specs() []Spec {
 	out := make([]Spec, 0, len(r.order))
 	for _, n := range r.order {
