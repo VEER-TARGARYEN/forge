@@ -33,10 +33,13 @@ import (
 //go:embed all:payload
 var payload embed.FS
 
+// appVersion is stamped by mkdist so the installer, the Installed-apps entry,
+// and the binaries it carries all report the same release.
+var appVersion = "1.0.0-dev"
+
 const (
 	appName    = "FORGE"
 	appPublish = "VEER-TARGARYEN"
-	appVersion = "1.0.0"
 	appURL     = "https://github.com/VEER-TARGARYEN/forge"
 	// uninstallKey is the registry subkey Windows lists in Installed apps.
 	uninstallKey = `Software\Microsoft\Windows\CurrentVersion\Uninstall\FORGE`

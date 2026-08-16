@@ -36,7 +36,10 @@ import (
 	"github.com/VEER-TARGARYEN/forge/internal/tools"
 )
 
-const version = "1.0.0 (phases 0-8)"
+// version is stamped by mkdist at release time with
+// -ldflags "-X main.version=...". The default is what a plain `go build`
+// produces, so a locally built binary never claims to be a release.
+var version = "1.0.0-dev"
 
 // defaultCommand is what to run when the binary is invoked with no arguments.
 //

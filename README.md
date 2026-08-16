@@ -3,6 +3,54 @@
 A from-scratch coding-agent stack. **Zero external dependencies** — Go standard
 library only, one static binary.
 
+## Install
+
+**Windows** — in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/VEER-TARGARYEN/forge/main/install.ps1 | iex
+```
+
+**macOS and Linux:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/VEER-TARGARYEN/forge/main/install.sh | sh
+```
+
+Both download the installer for your platform from the
+[latest release](https://github.com/VEER-TARGARYEN/forge/releases/latest),
+verify it against the published `SHA256SUMS`, and run it. Everything lands
+under your home directory — **no sudo, no administrator rights, no UAC
+prompt** — and uninstalling removes exactly what was installed.
+
+Piping a script into a shell is a thing to be suspicious of. Both are short
+enough to read first: [`install.ps1`](install.ps1), [`install.sh`](install.sh).
+You can also just download an installer from the
+[releases page](https://github.com/VEER-TARGARYEN/forge/releases) and run it,
+or build from source:
+
+```bash
+git clone https://github.com/VEER-TARGARYEN/forge && cd forge
+go install ./cmd/forge
+```
+
+Then:
+
+```bash
+forge init          # write a starter config
+forge doctor        # check which providers are reachable
+forge app           # open the desktop interface
+```
+
+`forge init` writes `~/.forge/config.json` wired for the free tiers. Add one
+API key — [Gemini](https://aistudio.google.com/apikey) has the most generous
+free limits — or point it at [Ollama](https://ollama.com) and run with no
+account at all. `forge doctor` tells you which of them actually work.
+
+> Windows SmartScreen may warn about the installer: it is unsigned, because
+> a code-signing certificate costs a few hundred dollars a year. **More info →
+> Run anyway**, or verify the checksum yourself against `SHA256SUMS`.
+
 **Phase 0 + 1** benchmark what your hardware and your free tiers actually
 deliver, then expose all of them as a single OpenAI-compatible endpoint that
 fails over automatically when one runs out.

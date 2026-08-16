@@ -1,0 +1,57 @@
+name: release
+
+# Push a tag and the installers build themselves. Doing it by hand works, but
+# it means the published binaries came from whatever was on one laptop that
+# afternoon — including whatever was uncommitted.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # mkdist derives the version from git describe
+
+      - uses: actions/setup-go@v5
+        with:
+          # Read the version from go.mod so this file is not a second place
+          # the toolchain version has to be kept up to date.
+          go-version-file: go.mod
+          check-latest: true
+
+      # The project has no dependencies, so this is the whole test suite.
+      - name: Vet and test
+        run: |
+          gofmt -l ./cmd ./internal | tee /tmp/fmt
+          test ! -s /tmp/fmt || { echo "gofmt found unformatted files"; exit 1; }
+          go vet ./...
+          go test ./...
+
+      - name: Invariants
+        run: go run ./cmd/forge selfcheck
+
+      - name: Build installers
+        run: |
+          VERSION="${{ github.event.inputs.version || github.ref_name }}"
+          go run ./cmd/mkdist -all -clean -version "${VERSION#v}"
+
+      - name: Checksums
+        run: cat dist/SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
+          draft: false
