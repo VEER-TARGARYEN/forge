@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/VEER-TARGARYEN/forge/internal/gui"
 )
@@ -147,20 +148,20 @@ func doInstall(target string, noShortcuts, noPath, launch bool, log func(string,
 		return fmt.Errorf("create %s: %w", target, err)
 	}
 
+	// An upgrade with the app still open is the normal case. Close our own
+	// processes before touching their executables, rather than discovering
+	// they are locked halfway through and leaving a half-written install.
+	if n, err := stopRunningInstances(target); err != nil {
+		log("  (could not check for a running %s: %v)", appName, err)
+	} else if n > 0 {
+		log("  closed %d running instance(s)", n)
+	}
+
 	for name, data := range bins {
-		dst := filepath.Join(target, name)
-		// Replacing a running executable fails on Windows with a sharing
-		// violation. Renaming it out of the way first always works, and the
-		// stale copy is removed on the next run.
-		if _, err := os.Stat(dst); err == nil {
-			old := dst + ".old"
-			_ = os.Remove(old)
-			if err := os.Rename(dst, old); err != nil {
-				return fmt.Errorf("replace %s (is it running?): %w", name, err)
-			}
-		}
-		if err := os.WriteFile(dst, data, 0o755); err != nil {
-			return fmt.Errorf("write %s: %w", dst, err)
+		if err := replaceBinary(filepath.Join(target, name), data); err != nil {
+			return fmt.Errorf("could not replace %s.\n"+
+				"Close %s (check the system tray and Task Manager) and run this installer again.\n"+
+				"  %v", name, appName, err)
 		}
 		log("  installed %s", name)
 	}
@@ -234,6 +235,32 @@ func payloadBinaries() (map[string][]byte, error) {
 	return out, err
 }
 
+// replaceBinary writes data to dst, moving any existing file aside first.
+//
+// Windows will not overwrite a running executable, but it will usually let one
+// be renamed within the same directory — the handle follows the inode, not the
+// name. That is what makes an in-place upgrade possible at all. A process that
+// only just exited can still hold the file for a moment, so a failed rename is
+// retried briefly before giving up.
+func replaceBinary(dst string, data []byte) error {
+	if _, err := os.Stat(dst); err == nil {
+		old := dst + ".old"
+		_ = os.Remove(old)
+
+		var err error
+		for attempt := 0; attempt < 5; attempt++ {
+			if err = os.Rename(dst, old); err == nil {
+				break
+			}
+			time.Sleep(time.Duration(200*(attempt+1)) * time.Millisecond)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(dst, data, 0o755)
+}
+
 // installSelf places a copy of this executable in the install directory so the
 // uninstaller is always where the registry says it is.
 func installSelf(target string) error {
@@ -253,12 +280,7 @@ func installSelf(target string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(dst); err == nil {
-		old := dst + ".old"
-		_ = os.Remove(old)
-		_ = os.Rename(dst, old)
-	}
-	return os.WriteFile(dst, b, 0o755)
+	return replaceBinary(dst, b)
 }
 
 func sameFile(a, b string) (bool, error) {

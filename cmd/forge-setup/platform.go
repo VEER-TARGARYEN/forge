@@ -45,6 +45,53 @@ func firstLines(s string, n int) string {
 	return strings.TrimSpace(strings.Join(lines, "; "))
 }
 
+// ---------- running instances ----------
+
+// stopRunningInstances closes any FORGE process launched from the install
+// directory, and reports how many it stopped.
+//
+// Windows refuses to replace or rename a running executable, and upgrading
+// while the app is open is the normal case, not an edge case. Failing with
+// "Access is denied" leaves the user to work out for themselves which process
+// to hunt down — and the answer is one this installer put there.
+//
+// Only processes whose image actually lives under the install directory are
+// touched. Matching on the file name alone would kill an unrelated build
+// somebody happened to be running from elsewhere.
+func stopRunningInstances(target string) (int, error) {
+	if runtime.GOOS != "windows" {
+		// Unix replaces a running binary happily: the old inode stays alive
+		// for the running process and the new file takes the name.
+		return 0, nil
+	}
+
+	self := os.Getpid()
+	script := strings.Join([]string{
+		"$t = " + psQuote(target),
+		fmt.Sprintf("$me = %d", self),
+		"$ps = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {",
+		"  $_.Id -ne $me -and $_.Path -and $_.Path.StartsWith($t, 'OrdinalIgnoreCase') })",
+		"if ($ps.Count -eq 0) { '0'; exit }",
+		// Ask politely first so the app can shut its server down cleanly.
+		"foreach ($p in $ps) { try { $p.CloseMainWindow() | Out-Null } catch {} }",
+		"Start-Sleep -Milliseconds 600",
+		"foreach ($p in $ps) { if (-not $p.HasExited) { try { $p | Stop-Process -Force -ErrorAction Stop } catch {} } }",
+		"Start-Sleep -Milliseconds 400",
+		"$ps.Count",
+	}, "\n")
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("%s", firstLines(strings.TrimSpace(string(out)), 2))
+	}
+	n := 0
+	if _, scanErr := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &n); scanErr != nil {
+		return 0, nil // nothing parseable means nothing was running
+	}
+	return n, nil
+}
+
 // ---------- shortcuts ----------
 
 func createShortcuts(target, iconPath string, log func(string, ...any)) error {
@@ -289,6 +336,12 @@ func dirSizeKB(dir string) int64 {
 
 func doUninstall(target string, log func(string, ...any)) error {
 	log("Removing %s from %s\n", appName, target)
+
+	// Same reason as installing: a still-open app holds its own executable,
+	// and the files would be left behind with no explanation.
+	if n, err := stopRunningInstances(target); err == nil && n > 0 {
+		log("  closed %d running instance(s)", n)
+	}
 
 	if err := removeFromPath(target); err != nil {
 		log("  (PATH not cleaned: %v)", err)
