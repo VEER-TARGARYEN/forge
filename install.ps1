@@ -135,7 +135,39 @@ try {
     $args = @()
     if ($Dir)       { $args += @('-dir', $Dir) }
     if ($NoLaunch)  { $args += '-launch=false' }
-    & $exe @args
+
+    try {
+        & $exe @args
+    } catch {
+        # Smart App Control, on by default on clean Windows 11 installs, blocks
+        # unsigned executables outright. Unlike SmartScreen there is no "run
+        # anyway" — so say what is actually happening and give the two routes
+        # that do work, rather than surfacing a .NET exception.
+        if ($_.Exception.Message -match 'Application Control|blocked this file') {
+            Write-Host ''
+            Write-Host 'Windows Smart App Control blocked the installer.' -ForegroundColor Yellow
+            Write-Host ''
+            Write-Host '  It blocks any unsigned executable, and FORGE is unsigned because a'
+            Write-Host '  code-signing certificate costs a few hundred dollars a year. There is'
+            Write-Host '  no per-file override for Smart App Control.'
+            Write-Host ''
+            Write-Host '  Two things that do work:'
+            Write-Host ''
+            Write-Host '  1. Build from source (needs Go, and is not affected):'
+            Write-Host '       git clone https://github.com/VEER-TARGARYEN/forge'
+            Write-Host '       cd forge'
+            Write-Host '       go install ./cmd/forge'
+            Write-Host ''
+            Write-Host '  2. Turn Smart App Control off, if you understand the trade-off:'
+            Write-Host '       Windows Security > App & browser control > Smart App Control'
+            Write-Host '     Note this is one-way: it cannot be switched back on without'
+            Write-Host '     reinstalling Windows.'
+            Write-Host ''
+            Write-Host "  The download itself was fine — its checksum matched the published one."
+            exit 1
+        }
+        Die $_.Exception.Message
+    }
     if ($LASTEXITCODE -ne 0) { Die "the installer exited with code $LASTEXITCODE" }
 
 } finally {

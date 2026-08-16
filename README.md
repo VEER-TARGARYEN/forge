@@ -47,9 +47,29 @@ API key — [Gemini](https://aistudio.google.com/apikey) has the most generous
 free limits — or point it at [Ollama](https://ollama.com) and run with no
 account at all. `forge doctor` tells you which of them actually work.
 
-> Windows SmartScreen may warn about the installer: it is unsigned, because
-> a code-signing certificate costs a few hundred dollars a year. **More info →
-> Run anyway**, or verify the checksum yourself against `SHA256SUMS`.
+### Windows: unsigned binaries
+
+The installer is unsigned, because a code-signing certificate costs a few
+hundred dollars a year. Two different things may object:
+
+- **SmartScreen** shows "Windows protected your PC". Click **More info → Run
+  anyway**. This is the common case.
+- **Smart App Control** — on by default on clean Windows 11 installs — blocks
+  it outright with *"An Application Control policy has blocked this file"*.
+  There is no per-file override. Either build from source, which is unaffected:
+
+  ```bash
+  git clone https://github.com/VEER-TARGARYEN/forge && cd forge
+  go install ./cmd/forge
+  ```
+
+  or turn Smart App Control off under *Windows Security → App & browser
+  control*, understanding that it cannot be switched back on without
+  reinstalling Windows.
+
+Either way, verify what you downloaded against `SHA256SUMS` on the release
+page first — the install scripts do this automatically and refuse to run a
+binary whose checksum does not match.
 
 **Phase 0 + 1** benchmark what your hardware and your free tiers actually
 deliver, then expose all of them as a single OpenAI-compatible endpoint that
