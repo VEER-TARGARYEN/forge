@@ -287,6 +287,7 @@ type wireStreamChoice struct {
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
 			} `json:"function"`
+			ExtraContent json.RawMessage `json:"extra_content"`
 		} `json:"tool_calls"`
 	} `json:"delta"`
 	FinishReason string `json:"finish_reason"`
@@ -429,6 +430,12 @@ func (c *OpenAICompat) Stream(ctx context.Context, model string, req Request, on
 			}
 			if tc.Type != "" {
 				slot.Type = tc.Type
+			}
+			// Gemini streams the thought_signature here, usually on the same
+			// delta as the function name. Keep the first non-empty one seen
+			// for this index; it must be echoed back or the next turn 400s.
+			if len(tc.ExtraContent) > 0 && string(tc.ExtraContent) != "null" && len(slot.ExtraContent) == 0 {
+				slot.ExtraContent = tc.ExtraContent
 			}
 			if tc.Function.Name != "" {
 				slot.Function.Name = tc.Function.Name

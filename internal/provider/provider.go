@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -30,6 +31,13 @@ type ToolCall struct {
 	ID       string       `json:"id"`
 	Type     string       `json:"type"`
 	Function FunctionCall `json:"function"`
+
+	// ExtraContent carries provider-specific data that must survive the
+	// round trip. Gemini 3 returns a `thought_signature` here on every tool
+	// call and hard-rejects (HTTP 400) the next request if the assistant turn
+	// is replayed without it. Preserved verbatim and echoed back; omitempty
+	// keeps it off the wire for providers that never set it.
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 type Message struct {

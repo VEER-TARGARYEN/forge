@@ -51,6 +51,7 @@ func Run(w io.Writer) (checks []Check, ok bool) {
 		{"stream: rejoins fragmented tool-call JSON", checkToolCallFragments},
 		{"stream: estimates usage when provider omits it", checkEstimatedUsage},
 		{"stream: accepts array-form content", checkArrayContent},
+		{"stream: preserves Gemini thought_signature on tool calls", checkThoughtSignature},
 		{"stream: routes inline <think> to the reasoning channel", checkThinkSplit},
 		{"stream: a <think> tag split across chunks still works", checkThinkAcrossChunks},
 		{"timing: non-streaming reports no fabricated rate", checkNoFakeThroughput},
@@ -311,6 +312,56 @@ func checkNoFakeThroughput() (string, error) {
 // the DeepSeek-R1 distills — would otherwise put their scratchpad into the
 // agent's message history, where it is re-sent on every subsequent turn. This
 // is measured: qwen3.6-27b spends 182 tokens saying "ok".
+// Gemini 3 returns a thought_signature inside each tool call's extra_content
+// and hard-rejects (HTTP 400) the next request if the assistant turn is
+// replayed without it. Observed live: the agent died on its second step until
+// this round-tripped. The signature must survive both stream decoding and
+// re-serialisation of the message.
+func checkThoughtSignature() (string, error) {
+	srv := sseServer([]string{
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":"},"extra_content":{"google":{"thought_signature":"SIG-abc-123"}}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"main.go\"}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15}}`,
+	}, nil)
+	defer srv.Close()
+
+	resp, err := client("g", srv.URL).Stream(context.Background(), "m",
+		provider.Request{Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}}}, nil)
+	if err != nil {
+		return "", failf("stream: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		return "", failf("got %d tool calls, want 1", len(resp.ToolCalls))
+	}
+	tc := resp.ToolCalls[0]
+	if !strings.Contains(string(tc.ExtraContent), "SIG-abc-123") {
+		return "", failf("thought_signature not captured: extra_content = %q", string(tc.ExtraContent))
+	}
+	// Arguments must still assemble correctly alongside the extra field.
+	if tc.Function.Arguments != `{"path":"main.go"}` {
+		return "", failf("args = %q", tc.Function.Arguments)
+	}
+
+	// The whole point is the round trip: re-serialising the assistant message
+	// must put the signature back on the wire for the next request.
+	msg := provider.Message{Role: provider.RoleAssistant, ToolCalls: resp.ToolCalls}
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		return "", failf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), "SIG-abc-123") || !strings.Contains(string(raw), "thought_signature") {
+		return "", failf("signature dropped on re-serialisation: %s", raw)
+	}
+	// A tool call with no extra_content must not emit an empty field, or
+	// stricter providers may object.
+	plain, _ := json.Marshal(provider.Message{Role: provider.RoleAssistant,
+		ToolCalls: []provider.ToolCall{{ID: "x", Type: "function"}}})
+	if strings.Contains(string(plain), "extra_content") {
+		return "", failf("empty extra_content leaked onto the wire: %s", plain)
+	}
+	return "captured, replayed, omitted when absent", nil
+}
+
 func checkThinkSplit() (string, error) {
 	srv := sseServer([]string{
 		`{"choices":[{"index":0,"delta":{"content":"<think>Let me consider. The user wants ok.</think>"}}]}`,
