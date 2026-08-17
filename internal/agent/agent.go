@@ -344,6 +344,25 @@ func unappliedCode(content string) string {
 	return ""
 }
 
+// howToWrite is the corrective half of a nudge: not "make the change now",
+// which a 7B answers by apologising and producing another fenced block, but
+// the name of the one mechanism that will actually work.
+//
+// Which mechanism that is depends on the protocol, because in blocks mode the
+// file-writing tools are hidden — telling a model to call write_file when it
+// cannot see write_file is worse than saying nothing.
+func (a *Agent) howToWrite() string {
+	const closing = " Do that in your next message. Do not explain it again."
+	if a.cfg.Protocol == ProtoBlocks || !a.reg.Has("write_file") {
+		return "A fenced code block does nothing on its own — only a SEARCH/REPLACE " +
+			"block reaches disk. Put the real file path on its own line, then the " +
+			"markers exactly as the system prompt shows them, with an empty SEARCH " +
+			"section to create a new file." + closing
+	}
+	return "A fenced code block does nothing on its own. Call the write_file tool " +
+		"with the file's path and its full contents." + closing
+}
+
 // blockLoopLimit is how many times the same unproductive block may repeat
 // before the run is called off. Three is enough to distinguish a model
 // correcting itself from one that cannot.
@@ -605,7 +624,7 @@ func (a *Agent) Run(ctx context.Context, task string) (*Outcome, error) {
 				a.printf("  ! %s\n", why)
 				a.msgs = append(a.msgs, provider.Message{
 					Role:    provider.RoleUser,
-					Content: why + " Nothing has been written yet. Make the change now.",
+					Content: why + " " + a.howToWrite(),
 				})
 				continue
 			}
