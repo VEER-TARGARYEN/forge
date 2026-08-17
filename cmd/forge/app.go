@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -79,11 +82,21 @@ func findChromium() string {
 	return ""
 }
 
-// freePort asks the OS for an unused port by binding and immediately closing.
+// defaultAppPort is deliberately fixed.
 //
-// A fixed port would collide with a second instance, or with whatever else on
-// the machine claimed 4100 first, and the failure would surface as a blank
-// window rather than an error anyone can act on.
+// The first version picked a free port on every launch, which broke the app in
+// a way that only showed up on the second run: the service worker caches the
+// shell per origin, so yesterday's port still rendered the whole interface
+// from cache and then failed every API call against a socket nobody was
+// listening on. The user sees "Failed to fetch" on an app that looks fine.
+// A PWA installed from that origin, or any bookmark, breaks the same way.
+//
+// A stable port keeps the origin stable, which is what makes an install stay
+// installed.
+const defaultAppPort = 4100
+
+// freePort asks the OS for an unused port by binding and immediately closing.
+// Only used when the fixed port is taken by something that is not forge.
 func freePort() (int, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -93,11 +106,44 @@ func freePort() (int, error) {
 	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
+// portFree reports whether we can bind the port right now.
+func portFree(port int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
+}
+
+// forgeAlreadyServing reports whether the thing holding a port is a forge
+// server, so a second launch can join it instead of starting a rival agent
+// with the same workspace.
+func forgeAlreadyServing(port int) bool {
+	c := &http.Client{Timeout: 1500 * time.Millisecond}
+	resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/api/bootstrap", port))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var probe struct {
+		Version   string `json:"version"`
+		Workspace string `json:"workspace"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&probe) != nil {
+		return false
+	}
+	return probe.Version != ""
+}
+
 func cmdApp(args []string) error {
 	fs := flag.NewFlagSet("app", flag.ExitOnError)
 	cfgPath := addConfigFlag(fs)
 	dir := fs.String("dir", ".", "workspace root the agent may act in")
-	port := fs.Int("port", 0, "port to serve on (0 picks a free one)")
+	port := fs.Int("port", defaultAppPort, "port to serve on (0 picks a free one)")
 	width := fs.Int("width", 1440, "window width")
 	height := fs.Int("height", 900, "window height")
 	browserPath := fs.String("browser", "", "path to a Chromium-family browser (default: autodetect)")
@@ -140,10 +186,33 @@ func cmdApp(args []string) error {
 	}
 
 	p := *port
-	if p == 0 {
+	switch {
+	case p == 0:
 		if p, err = freePort(); err != nil {
 			return fmt.Errorf("could not find a free port: %w", err)
 		}
+	case portFree(p):
+		// The common case: the fixed port is ours to take.
+	case forgeAlreadyServing(p):
+		// FORGE is already up. Show that window rather than starting a second
+		// agent on the same workspace — two loops editing one tree is a way to
+		// lose work, and the user asked to open the app, not to run two.
+		url := fmt.Sprintf("http://127.0.0.1:%d", p)
+		fmt.Fprintf(os.Stderr, "FORGE is already running at %s\n", url)
+		if !*noWindow {
+			openAppWindow(*browserPath, url, e.cfg.Dir(), *width, *height)
+		}
+		return nil
+	default:
+		// Something else has it. Move rather than fail, and say so, because
+		// the app will come up on an origin the user's install does not know.
+		if p, err = freePort(); err != nil {
+			return fmt.Errorf("could not find a free port: %w", err)
+		}
+		fmt.Fprintf(os.Stderr,
+			"port %d is in use by another program; serving on %d instead.\n"+
+				"An installed shortcut pointing at %d will not reach this window.\n",
+			*port, p, *port)
 	}
 
 	em, err := resolveEmbedder(*embedModel, e.cfg.Dir(), nil)
@@ -178,44 +247,52 @@ func cmdApp(args []string) error {
 		if *noWindow {
 			return
 		}
-
-		bin := *browserPath
-		if bin == "" {
-			bin = findChromium()
+		cmd := openAppWindow(*browserPath, url, e.cfg.Dir(), *width, *height)
+		if cmd == nil {
+			return // already fell back to the default browser
 		}
-		if bin == "" {
-			// No Chromium anywhere: fall back to the default browser. The app
-			// still works, it just arrives in a tab.
-			fmt.Fprintf(os.Stderr,
-				"no Chromium-family browser found; opening your default browser instead\n")
-			openBrowser(url)
-			return
-		}
-
-		profile := filepath.Join(e.cfg.Dir(), "appwindow")
-		cmd := exec.Command(bin,
-			"--app="+url,
-			"--window-size="+fmt.Sprintf("%d,%d", *width, *height),
-			// A dedicated profile keeps the window out of the user's browsing
-			// session, and is what makes it a separate taskbar entry rather
-			// than another window of their browser.
-			"--user-data-dir="+profile,
-			"--no-first-run",
-			"--no-default-browser-check",
-			"--disable-features=Translate,AutofillServerCommunication",
-		)
-		cmd.Stdout, cmd.Stderr = nil, nil
-		if err := cmd.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "could not open the app window: %v\n", err)
-			openBrowser(url)
-			return
-		}
-		fmt.Fprintf(os.Stderr, "window: %s\n\nclose the window to quit\n", filepath.Base(bin))
-
+		fmt.Fprintf(os.Stderr, "close the window to quit\n")
 		go func() {
 			_ = cmd.Wait()
 			close(windowClosed)
 			stop() // unwinds srv.Run through its context
 		}()
 	})
+}
+
+// openAppWindow launches a chromeless window at url and returns the running
+// command, or nil if it fell back to the default browser.
+func openAppWindow(browserPath, url, stateDir string, width, height int) *exec.Cmd {
+	bin := browserPath
+	if bin == "" {
+		bin = findChromium()
+	}
+	if bin == "" {
+		// No Chromium anywhere: fall back to the default browser. The app
+		// still works, it just arrives in a tab.
+		fmt.Fprintf(os.Stderr,
+			"no Chromium-family browser found; opening your default browser instead\n")
+		openBrowser(url)
+		return nil
+	}
+
+	cmd := exec.Command(bin,
+		"--app="+url,
+		fmt.Sprintf("--window-size=%d,%d", width, height),
+		// A dedicated profile keeps the window out of the user's browsing
+		// session, and is what makes it a separate taskbar entry rather than
+		// another window of their browser.
+		"--user-data-dir="+filepath.Join(stateDir, "appwindow"),
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-features=Translate,AutofillServerCommunication",
+	)
+	cmd.Stdout, cmd.Stderr = nil, nil
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "could not open the app window: %v\n", err)
+		openBrowser(url)
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "window: %s\n", filepath.Base(bin))
+	return cmd
 }

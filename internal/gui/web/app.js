@@ -167,10 +167,81 @@ async function render() {
       default:         go('sessions'); return;
     }
   } catch (e) {
+    // "Failed to fetch" means the page loaded from the service worker's cache
+    // but the server behind it is gone — the shell renders and every call
+    // fails. Saying so is the difference between a fixable problem and a
+    // browser error message nobody can act on.
+    if (isOffline(e)) {
+      view.replaceChildren(serverGoneScreen());
+      return;
+    }
     view.replaceChildren(el(`<div class="page"><div class="card">
       <div class="t-meta bad">Error</div>
       <p class="t-body">${esc(e.message)}</p></div></div>`));
   }
+}
+
+function isOffline(e) {
+  return e instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(e.message || '');
+}
+
+// showError renders a failure into a panel a view owns. Views that load their
+// own data asynchronously cannot throw to render()'s handler, so without this
+// they each reinvent an error box — and the one the user actually hit read
+// "Failed to fetch", which says nothing about what to do.
+function showError(container, e) {
+  if (isOffline(e)) {
+    container.replaceChildren(serverGoneScreen());
+    return;
+  }
+  container.replaceChildren(el(`<div class="card">
+    <div class="t-meta bad">Error</div>
+    <p class="t-body" style="margin:8px 0 0">${esc(e.message)}</p></div>`));
+}
+
+function serverGoneScreen() {
+  const page = el(`<div class="page" style="max-width:640px">
+    <div class="page-head">
+      <h1 class="t-display">FORGE is not running</h1>
+      <p class="t-body">This window is showing a cached copy of the interface.
+        The program behind it is not answering on <code>${esc(location.host)}</code>.</p>
+    </div>
+    <div class="card">
+      <div class="t-meta" style="margin-bottom:12px">Start it again</div>
+      <div class="stack" style="gap:14px">
+        <div>
+          <div class="t-sm dim" style="margin-bottom:6px">From the Start Menu or Desktop</div>
+          <div class="t-mono">FORGE</div>
+        </div>
+        <div>
+          <div class="t-sm dim" style="margin-bottom:6px">Or in a terminal</div>
+          <div class="t-mono">forge app</div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="t-meta" style="margin-bottom:10px">If it still will not connect</div>
+      <p class="t-sm dim" style="margin:0">
+        The local model needs Ollama running — <span class="t-mono">ollama serve</span>.
+        Check the rest with <span class="t-mono">forge doctor</span>.
+      </p>
+    </div>
+    <div class="row" style="gap:10px;margin-top:18px">
+      <button class="btn btn-primary" id="retry">${icon('refresh', 16)} Try again</button>
+    </div>
+  </div>`);
+
+  $('#retry', page).onclick = async () => {
+    try {
+      State.boot = await api('/api/bootstrap');
+      State.workspace = State.boot.workspace || '';
+      toast('Reconnected');
+      render();
+    } catch {
+      toast('Still no answer from ' + location.host, true);
+    }
+  };
+  return page;
 }
 
 function renderNav() {
@@ -862,7 +933,7 @@ function viewSearch() {
           <div class="code" style="max-height:180px"><pre>${esc(r.text)}</pre></div>
         </div>`).join('')}</div>`));
     } catch (e) {
-      hits.replaceChildren(el(`<div class="card"><div class="t-meta bad">Error</div><p>${esc(e.message)}</p></div>`));
+      showError(hits, e);
     }
   };
 
@@ -898,7 +969,7 @@ async function viewRepo() {
         </div>
       </div>`));
     } catch (e) {
-      body.replaceChildren(el(`<div class="card"><div class="t-meta bad">Error</div><p>${esc(e.message)}</p></div>`));
+      showError(body, e);
     }
   })();
 
@@ -948,7 +1019,7 @@ async function viewProviders() {
         ${renderClasses(b)}
       </div>`));
     } catch (e) {
-      body.replaceChildren(el(`<div class="card"><div class="t-meta bad">Error</div><p>${esc(e.message)}</p></div>`));
+      showError(body, e);
     }
   };
 
@@ -1029,7 +1100,7 @@ function viewVerify() {
         </div>`).join('')}
       </div>`));
     } catch (e) {
-      body.replaceChildren(el(`<div class="card"><div class="t-meta bad">Error</div><p>${esc(e.message)}</p></div>`));
+      showError(body, e);
     }
   };
   return page;
@@ -1258,6 +1329,14 @@ window.addEventListener('beforeinstallprompt', e => {
     $('#foot-model').textContent = State.boot.defaultClass || 'no class';
     $('#foot-dot').className = 'dot ' + ((State.boot.providers || []).some(p => p.configured) ? 'ok' : 'warn');
   } catch (e) {
+    if (isOffline(e)) {
+      // Nothing else will work either; show the one screen that helps rather
+      // than a chrome full of controls wired to a server that is not there.
+      $('#foot-model').textContent = 'not running';
+      $('#foot-dot').className = 'dot err';
+      $('#view').replaceChildren(serverGoneScreen());
+      return;
+    }
     toast('Could not reach the forge server: ' + e.message, true);
   }
   try { State.sessions = await api('/api/sessions'); } catch { /* first paint can proceed */ }
