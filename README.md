@@ -42,6 +42,30 @@ forge doctor        # check which providers are reachable
 forge app           # open the desktop interface
 ```
 
+### Fully offline, no accounts
+
+```bash
+forge init -local
+```
+
+Writes a config with **one provider — Ollama — and nothing else**. Not the
+hosted providers disabled: absent. There is nothing to sign up for, no key to
+leak, and no quota to run out of. Install [Ollama](https://ollama.com), pull a
+model, and set the window to match what the config declares:
+
+```bash
+ollama pull qwen2.5-coder:7b
+setx OLLAMA_CONTEXT_LENGTH 16384
+```
+
+That last line matters. If Ollama's window is smaller than the number in the
+config, forge will send prompts it thinks fit and Ollama will quietly truncate
+them — which looks like a model that has forgotten what it was doing.
+
+A 7B on CPU handles scoped work well: creating files, small edits, running
+checks. It cannot reliably repair a botched multi-line edit. Use `-model` and
+`-small-model` to point at something larger if you have the memory for it.
+
 `forge init` writes `~/.forge/config.json` wired for the free tiers. Add one
 API key — [Gemini](https://aistudio.google.com/apikey) has the most generous
 free limits — or point it at [Ollama](https://ollama.com) and run with no

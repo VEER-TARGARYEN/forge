@@ -408,3 +408,64 @@ func Default() *Config {
 	c.applyDefaults()
 	return c
 }
+
+// LocalOnly is a config with no cloud provider in it at all.
+//
+// Not the default config with the hosted entries disabled — actually absent.
+// A disabled provider is still a line of config asking to be given a key, and
+// the point of this shape is that there is nothing to sign up for, nothing to
+// leak, and no quota to run out of. The only way it stops working is if Ollama
+// is not running.
+//
+// Cooldowns are short throughout. The hosted defaults are tuned to protect a
+// free tier from being hammered; a local server has no tier to protect, and a
+// minute-long cooldown after one hiccup would just leave the agent idle with
+// nothing else to fall back to.
+func LocalOnly(model, small string, ctx int) *Config {
+	if model == "" {
+		model = "qwen2.5-coder:7b"
+	}
+	if small == "" {
+		small = model
+	}
+	if ctx <= 0 {
+		ctx = 16384
+	}
+	t := func(m string, note string) Target {
+		return Target{Provider: "ollama", Model: m, MaxContext: ctx, Note: note}
+	}
+	c := &Config{
+		Providers: []Provider{{
+			Name: "ollama", BaseURL: "http://127.0.0.1:11434/v1",
+			RequiresKey: boolPtr(false), JSONSchema: boolPtr(true),
+			TimeoutSec: 1800,
+			Note: "The only provider. Fully offline: no account, no key, no quota, " +
+				"no rate limit. Needs 'ollama serve' running.",
+		}},
+		Classes: map[string][]Target{
+			"planner": {t(model, "Reasoning and planning.")},
+			"coder": {
+				t(model, "Drives the agent loop."),
+				t(small, "Fallback if the main model is unloaded. Faster, weaker."),
+			},
+			"cheap": {t(small, "Compaction and sub-agent exploration — grunt work.")},
+			"local": {t(model, ""), t(small, "")},
+		},
+		Defaults: Defaults{Temperature: 0.2, MaxTokens: 4096},
+		Policy: Policy{
+			RateLimitCooldownSec:     5,
+			QuotaCooldownSec:         30,
+			AuthCooldownSec:          30,
+			ServerCooldownSec:        10,
+			BadRequestCooldownSec:    30,
+			ModelNotFoundCooldownSec: 30,
+			MaxCooldownSec:           60,
+			SameTargetRetries:        2,
+			RateLimitWaitSec:         10,
+			RateLimitWaits:           2,
+		},
+		Server: Server{Addr: "127.0.0.1:4000", DefaultClass: "coder"},
+	}
+	c.applyDefaults()
+	return c
+}

@@ -203,6 +203,10 @@ func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	path := fs.String("o", "", "output path (default: ~/.forge/config.json)")
 	force := fs.Bool("force", false, "overwrite an existing config")
+	local := fs.Bool("local", false, "offline only: Ollama and nothing else, no API keys")
+	model := fs.String("model", "", "model for -local (default: qwen2.5-coder:7b)")
+	small := fs.String("small-model", "", "faster model for compaction under -local")
+	ctx := fs.Int("context", 0, "context window to declare for -local (default: 16384)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -217,6 +221,32 @@ func cmdInit(args []string) error {
 	if _, err := os.Stat(out); err == nil && !*force {
 		return fmt.Errorf("%s already exists (use -force to overwrite)", out)
 	}
+	if *local {
+		if err := config.Save(config.LocalOnly(*model, *small, *ctx), out); err != nil {
+			return err
+		}
+		c, err := config.Load(out)
+		if err != nil {
+			return err
+		}
+		m := c.Classes["coder"][0]
+		fmt.Printf("wrote %s\n\n", out)
+		fmt.Printf(`Offline only. No account, no API key, no quota, no rate limit.
+
+  1. Install Ollama            https://ollama.com
+  2. ollama pull %s
+  3. Match the window forge declares, or the model will be given
+     more context than it can hold and silently truncate it:
+
+       setx OLLAMA_CONTEXT_LENGTH %d      (then restart Ollama)
+
+  4. forge doctor              confirm it is reachable
+     forge app                 open the interface
+
+`, m.Model, m.MaxContext)
+		return nil
+	}
+
 	if err := config.Save(config.Default(), out); err != nil {
 		return err
 	}
